@@ -25,6 +25,7 @@ import { getKey, saveKey, looksLikeApiKey } from './keystore.js';
 import { loadConfig, ensureDataDirs, createProvider, tryCreateProvider, isOllamaRunning, classifyError, costTracker } from '../core/index.js';
 import { seedDemoKB } from '../core/demo/seed.js';
 import { ingest } from '../core/ingest/index.js';
+import { generateIngestPreview, formatPreview } from '../core/ingest/preview.js';
 import { WikiCompiler } from '../core/compile/index.js';
 import { QueryEngine, buildLLMHistory } from '../core/query/index.js';
 import { WikiLinter } from '../core/lint/index.js';
@@ -37,7 +38,7 @@ import { FilesystemStorage } from '../core/storage/filesystem.js';
 import { QUERY_SYSTEM_PROMPT, CONVERSATION_CONTEXT_PROMPT, SESSION_DIGEST_PROMPT } from '../core/prompts.js';
 import { generateSessionDigest } from '../core/query/digest.js';
 import { crystallize } from '../core/query/crystallizer.js';
-import type { BrowzyConfig, LintIssue } from '../core/types.js';
+import type { BrowzyConfig, LintIssue, RawSource } from '../core/types.js';
 import type { LLMProvider } from '../core/llm/provider.js';
 import type { OutputFormat } from '../core/query/index.js';
 
@@ -113,6 +114,12 @@ export const BrowzyApp: React.FC = () => {
   const [outputFormat, setOutputFormat] = useState<OutputFormat>('markdown');
   const [sessionGaps, setSessionGaps] = useState<string[]>([]);
   const [pendingDive, setPendingDive] = useState<{ topic: string; originalInput: string } | null>(null);
+  const [pendingCompile, setPendingCompile] = useState<{
+    sources: RawSource[];
+    currentIndex: number;
+    guidance: Map<string, string>;
+    skipped: Set<string>;
+  } | null>(null);
   const [costStatus, setCostStatus] = useState('');
 
   // Refs for input/loading (no forward-reference issues)
@@ -605,9 +612,13 @@ export const BrowzyApp: React.FC = () => {
         if (!args) { session.addMessage('system', 'Drop a URL or file path after /add. Drag files into the terminal to paste their paths.'); return; }
         if (!requireLlm({ type: 'add', value: args })) return;
 
+        // Detect --interactive flag
+        const isInteractive = args.includes('--interactive');
+        const cleanArgs = args.replace('--interactive', '').trim();
+
         let sources: string[];
-        if (args.startsWith('--from ')) {
-          const filePath = args.replace('--from ', '').trim();
+        if (cleanArgs.startsWith('--from ')) {
+          const filePath = cleanArgs.replace('--from ', '').trim();
           try {
             const content = rfs(filePath, 'utf-8');
             const rawLines = content.split('\n').map(l => l.trim().replace(/^\d+\.\s*/, '')).filter(l => l && !l.startsWith('#'));
@@ -623,57 +634,85 @@ export const BrowzyApp: React.FC = () => {
             return;
           }
         } else {
-          sources = parseMultipleSources(args);
+          sources = parseMultipleSources(cleanArgs);
         }
 
         if (sources.length === 0) { session.addMessage('system', 'No valid sources found. Use URLs or file paths.'); return; }
 
+        // Step 1: Ingest all sources (fetch content, no LLM compilation yet)
         setLoading(true);
         const total = sources.length;
         if (total > 1) session.addMessage('system', `Ingesting ${total} sources...`);
-        const addedTitles: string[] = [];
+        const ingestedSources: RawSource[] = [];
 
         for (let i = 0; i < total; i++) {
           setLoadingLabel(`Ingesting (${i + 1}/${total})...`);
           try {
             const result = await ingest(sources[i], config.dataDir, { llm: llmRef.current! });
-            addedTitles.push(result.title);
+            ingestedSources.push(result);
             recordSourceAdded();
-            session.addMessage('system', `✓ [${i + 1}/${total}] "${result.title}"`);
+            session.addMessage('system', `Ingested [${i + 1}/${total}] "${result.title}"`);
           } catch (err: any) {
-            session.addMessage('system', `✗ [${i + 1}/${total}] Failed: ${err.message}`);
+            session.addMessage('system', `Failed [${i + 1}/${total}]: ${err.message}`);
           }
         }
-
-        setLoadingLabel(getCompilingMessage());
-        let created = 0, updated = 0;
-        try {
-          const compiler = new WikiCompiler(config.dataDir, llmRef.current!);
-          const result = await compiler.compile({
-            batchSize: config.compile.batchSize,
-            extractConcepts: config.compile.extractConcepts,
-            onProgress: (cur, tot, title) => setLoadingLabel(`Compiling (${cur}/${tot}): ${title.slice(0, 40)}...`),
-          });
-          created = result.articlesCreated.length;
-          updated = result.articlesUpdated.length;
-        } catch (err: any) {
-          session.addMessage('system', `Compile hiccup: ${err.message}`);
-        }
         setLoading(false);
-        refreshStats();
 
-        // Playful reward
-        const displayTitle = addedTitles.length === 1 ? addedTitles[0] : `${addedTitles.length} sources`;
-        if (addedTitles.length > 0 || created > 0 || updated > 0) {
-          const reward = getAddReward(displayTitle, created, updated, stats.articles + created);
-          if (reward) session.addMessage('system', reward);
+        if (ingestedSources.length === 0) {
+          session.addMessage('system', 'No sources were ingested successfully.');
+          break;
         }
 
-        // Check milestones
-        const milestone = checkMilestones({ ...stats, articles: stats.articles + created });
-        if (milestone) session.addMessage('system', milestone);
+        // Step 2: Decide whether to show interactive preview
+        const showPreview = isInteractive || ingestedSources.length <= 3;
 
-        setTempStatus(`+${sources.length} source${sources.length > 1 ? 's' : ''}`);
+        if (showPreview) {
+          // Show preview for the first source and enter interactive mode
+          try {
+            const preview = generateIngestPreview(ingestedSources[0], config.dataDir);
+            session.addMessage('system', formatPreview(preview) + '\n  Enter = compile, type guidance, or "skip"');
+          } catch {
+            session.addMessage('system', `  "${ingestedSources[0].title}" — preview unavailable\n  Enter = compile, type guidance, or "skip"`);
+          }
+
+          setPendingCompile({
+            sources: ingestedSources,
+            currentIndex: 0,
+            guidance: new Map(),
+            skipped: new Set(),
+          });
+          // Note: ingest activity is already logged by ingest/index.ts — no duplicate logging here
+        } else {
+          // 4+ sources without --interactive: auto-compile (current behavior)
+          setLoading(true);
+          setLoadingLabel(getCompilingMessage());
+          let created = 0, updated = 0;
+          try {
+            const compiler = new WikiCompiler(config.dataDir, llmRef.current!);
+            const result = await compiler.compile({
+              batchSize: config.compile.batchSize,
+              extractConcepts: config.compile.extractConcepts,
+              onProgress: (cur, tot, title) => setLoadingLabel(`Compiling (${cur}/${tot}): ${title.slice(0, 40)}...`),
+            });
+            created = result.articlesCreated.length;
+            updated = result.articlesUpdated.length;
+          } catch (err: any) {
+            session.addMessage('system', `Compile hiccup: ${err.message}`);
+          }
+          setLoading(false);
+          refreshStats();
+
+          const displayTitle = ingestedSources.length === 1 ? ingestedSources[0].title : `${ingestedSources.length} sources`;
+          if (ingestedSources.length > 0 || created > 0 || updated > 0) {
+            const reward = getAddReward(displayTitle, created, updated, stats.articles + created);
+            if (reward) session.addMessage('system', reward);
+          }
+
+          const milestone = checkMilestones({ ...stats, articles: stats.articles + created });
+          if (milestone) session.addMessage('system', milestone);
+
+          setTempStatus(`+${sources.length} source${sources.length > 1 ? 's' : ''}`);
+        }
         break;
       }
       case '/health': {
@@ -691,6 +730,7 @@ export const BrowzyApp: React.FC = () => {
             const txt = issues.map((i: LintIssue) => `  ${i.severity === 'error' ? '✗' : i.severity === 'warning' ? '!' : '·'} [${i.article}] ${i.message}`).join('\n');
             session.addMessage('system', txt);
           }
+          try { const { ActivityLog } = await import('../core/activityLog.js'); new ActivityLog(config.dataDir).logLint(e, w, s); } catch { /* log must never block */ }
           session.addMessage('system', getHealthReward(e, w, s));
         } catch (err: any) { session.addMessage('system', `Health check failed: ${err.message}`); }
         setLoading(false); break;
@@ -995,18 +1035,42 @@ export const BrowzyApp: React.FC = () => {
         refreshStats();
         break;
       }
+      case '/log': {
+        const { ActivityLog } = await import('../core/activityLog.js');
+        const log = new ActivityLog(config.dataDir);
+        const count = parseInt(args, 10) || 20;
+        session.addMessage('system', log.readRecent(count));
+        break;
+      }
+      case '/schema': {
+        const { ensureSchema, schemaPath: getSchemaPath, readSchema, DEFAULT_SCHEMA } = await import('../core/schema.js');
+        if (args === 'reset') {
+          const { writeFileSync } = await import('fs');
+          writeFileSync(getSchemaPath(config.dataDir), DEFAULT_SCHEMA);
+          session.addMessage('system', 'Schema reset to defaults.');
+        } else if (args === 'show') {
+          const content = readSchema(config.dataDir);
+          session.addMessage('system', content || '(no custom schema set — edit with /schema)');
+        } else {
+          const p = ensureSchema(config.dataDir);
+          session.addMessage('system', `Schema file: ${p}\nEdit this file to customize your browzy's behavior.`);
+        }
+        break;
+      }
       case '/help':
         session.addMessage('system', [
           'Just type a question — your browzy will find the answer.',
           '',
           '/add <sources...>     Feed your browzy (URLs, PDFs, images, .md, .txt)',
-          '                      Supports: multiple URLs, --from <file.txt>',
+          '                      Supports: multiple URLs, --from <file.txt>, --interactive',
           '/search <term>        Find articles in your browzy',
           '/format <type>        Output format: markdown, marp, json',
           '/copy                 Copy last answer to clipboard',
           '/health               How is your browzy doing?',
           '/model <provider>     Switch LLM model',
           '/refresh              Re-fetch stale web sources',
+          '/log [n]              Show recent activity (default 20)',
+          '/schema [show|reset]  Customize compilation & query behavior',
           '/export               Save session to file',
           '/rebuild              Force recompilation',
           '/clear                Clear conversation',
@@ -1032,6 +1096,79 @@ export const BrowzyApp: React.FC = () => {
 
   const handleSubmit = useCallback(async (value: string) => {
     const trimmed = value.trim();
+
+    // Interactive ingest: check pendingCompile BEFORE pendingDive
+    if (pendingCompile) {
+      setInput('');
+      autocomplete.setVisible(false);
+      const source = pendingCompile.sources[pendingCompile.currentIndex];
+
+      if (trimmed.toLowerCase() === 'skip') {
+        pendingCompile.skipped.add(source.id);
+        session.addMessage('system', `Deferred "${source.title}". Run /rebuild when ready.`);
+      } else if (trimmed.length > 0) {
+        const newGuidance = new Map(pendingCompile.guidance);
+        newGuidance.set(source.id, trimmed);
+        pendingCompile.guidance = newGuidance;
+        session.addMessage('system', `Guidance noted for "${source.title}".`);
+      }
+      // else: Enter = no guidance, compile with defaults
+
+      const nextIndex = pendingCompile.currentIndex + 1;
+      if (nextIndex < pendingCompile.sources.length) {
+        // Show next source preview
+        const nextSource = pendingCompile.sources[nextIndex];
+        try {
+          const preview = generateIngestPreview(nextSource, config.dataDir);
+          session.addMessage('system', formatPreview(preview) + '\n  Enter = compile, type guidance, or "skip"');
+        } catch {
+          session.addMessage('system', `  "${nextSource.title}" — preview unavailable\n  Enter = compile, type guidance, or "skip"`);
+        }
+        setPendingCompile({ ...pendingCompile, currentIndex: nextIndex });
+      } else {
+        // All sources reviewed — compile non-skipped ones
+        const toCompile = pendingCompile.sources.filter(s => !pendingCompile.skipped.has(s.id));
+        const guidance = pendingCompile.guidance;
+        setPendingCompile(null);
+
+        if (toCompile.length === 0) {
+          session.addMessage('system', 'All sources deferred. Run /rebuild when ready.');
+          refreshStats();
+          return;
+        }
+
+        setLoading(true);
+        setLoadingLabel(getCompilingMessage());
+        let created = 0, updated = 0;
+        try {
+          const compiler = new WikiCompiler(config.dataDir, llmRef.current!);
+          const result = await compiler.compile({
+            batchSize: config.compile.batchSize,
+            extractConcepts: config.compile.extractConcepts,
+            guidance,
+            onProgress: (cur, tot, title) => setLoadingLabel(`Compiling (${cur}/${tot}): ${title.slice(0, 40)}...`),
+          });
+          created = result.articlesCreated.length;
+          updated = result.articlesUpdated.length;
+        } catch (err: any) {
+          session.addMessage('system', `Compile hiccup: ${err.message}`);
+        }
+        setLoading(false);
+        refreshStats();
+
+        const displayTitle = toCompile.length === 1 ? toCompile[0].title : `${toCompile.length} sources`;
+        if (toCompile.length > 0 || created > 0 || updated > 0) {
+          const reward = getAddReward(displayTitle, created, updated, stats.articles + created);
+          if (reward) session.addMessage('system', reward);
+        }
+
+        const milestone = checkMilestones({ ...stats, articles: stats.articles + created });
+        if (milestone) session.addMessage('system', milestone);
+
+        setTempStatus(`+${toCompile.length} source${toCompile.length > 1 ? 's' : ''}`);
+      }
+      return;
+    }
 
     // #8: check pendingDive BEFORE empty-input return so Enter confirms dive
     if (pendingDive) {
@@ -1211,7 +1348,7 @@ export const BrowzyApp: React.FC = () => {
     if (normalized.startsWith('/')) await handleCommand(normalized);
     else await handleQuery(normalized);
   // #21: use refs for frequently-changing values to break dependency cascade
-  }, [autocomplete, history, handleCommand, handleQuery, awaitingApiKey, config, session, pendingDive, requireLlm, refreshStats]);
+  }, [autocomplete, history, handleCommand, handleQuery, awaitingApiKey, config, session, pendingCompile, pendingDive, requireLlm, refreshStats]);
 
   // ── Keyboard ────────────────────────────────────────────────
 

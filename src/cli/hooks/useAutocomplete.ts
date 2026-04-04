@@ -9,6 +9,8 @@ const COMMANDS: Suggestion[] = [
   { name: '/health', description: 'How is your browzy doing?' },
   { name: '/model', description: 'Switch models', usage: '/model [model-id]' },
   { name: '/rebuild', description: 'Recompile from scratch' },
+  { name: '/log', description: 'Recent activity log', usage: '/log [count]' },
+  { name: '/schema', description: 'Customize browzy behavior', usage: '/schema [show|reset]' },
   { name: '/export', description: 'Save this session as markdown' },
   { name: '/clear', description: 'Clear conversation' },
   { name: '/help', description: 'All commands' },

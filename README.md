@@ -7,7 +7,14 @@
 </p>
 
 <p align="center">
-  <a href="#quickstart">Quickstart</a> &middot;
+  Open source. Self-hosted. No Browzy account required.
+</p>
+
+<p align="center">
+  <code>npm install -g browzy</code>
+</p>
+
+<p align="center">
   <a href="#how-it-works">How it works</a> &middot;
   <a href="#commands">Commands</a> &middot;
   <a href="#features">Features</a> &middot;
@@ -17,7 +24,7 @@
 
 ---
 
-**browzy** is an LLM-powered personal knowledge base that lives in your terminal. Feed it articles, PDFs, images, and web links. An AI compiles everything into an interconnected knowledge base, then you ask it questions and it answers from *your* collected knowledge.
+**browzy** is an LLM-powered personal knowledge base that lives in your terminal. Feed it articles, PDFs, images, and web links. An AI compiles everything into an interconnected knowledge base, then you ask it questions and it answers from *your* collected knowledge. Everything runs locally on your machine.
 
 ```
 $ browzy

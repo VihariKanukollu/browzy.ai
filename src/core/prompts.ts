@@ -446,6 +446,19 @@ SUMMARY: One sentence summary of the novel insight.
 Remember: quality over quantity. When in doubt, output NONE.`;
 
 
+// ── Schema-aware prompt builders ──────────────────────────────
+
+export function buildCompilerSystemPrompt(schema?: string | null): string {
+  if (!schema) return COMPILER_FULL_SYSTEM;
+  return `# User Schema\n\nThe knowledge base owner has defined these preferences. Follow them when compiling:\n\n${schema}\n\n---\n\n${COMPILER_FULL_SYSTEM}`;
+}
+
+export function buildQuerySystemPrompt(schema?: string | null): string {
+  if (!schema) return QUERY_SYSTEM_PROMPT;
+  return `# User Schema\n\nThe knowledge base owner has defined these preferences. Follow them when answering:\n\n${schema}\n\n---\n\n${QUERY_SYSTEM_PROMPT}`;
+}
+
+
 export const JSON_OUTPUT_PROMPT = `Output your answer as a JSON object with this structure:
 
 {

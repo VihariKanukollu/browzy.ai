@@ -97,6 +97,9 @@ export async function ingest(
   }
   fsStore.writeRawManifest(manifest);
 
+  // Log the ingest activity
+  try { const { ActivityLog } = await import('../activityLog.js'); new ActivityLog(dataDir).logIngest(source.title, source.type, source.origin); } catch { /* activity log must never block */ }
+
   // Invalidate query cache — new data means old answers may be stale
   queryCache.invalidate();
 

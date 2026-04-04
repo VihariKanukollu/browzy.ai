@@ -4,7 +4,9 @@ import { SQLiteStorage } from '../storage/sqlite.js';
 import type { LLMProvider } from '../llm/provider.js';
 import type { RawSource, WikiArticle, ArticleFrontmatter, WikiIndex } from '../types.js';
 import { sanitizeUnicode } from '../sanitization.js';
-import { COMPILER_SYSTEM_PROMPT as SYSTEM_PROMPT, CONCEPT_EXTRACTION_PROMPT, COMPILER_FULL_SYSTEM } from '../prompts.js';
+import { COMPILER_SYSTEM_PROMPT as SYSTEM_PROMPT, CONCEPT_EXTRACTION_PROMPT, COMPILER_FULL_SYSTEM, buildCompilerSystemPrompt } from '../prompts.js';
+import { readSchema } from '../schema.js';
+import { ActivityLog } from '../activityLog.js';
 
 export interface CompileResult {
   articlesCreated: string[];
@@ -16,8 +18,10 @@ export class WikiCompiler {
   private fs: FilesystemStorage;
   private db: SQLiteStorage;
   private llm: LLMProvider;
+  private dataDir: string;
 
   constructor(dataDir: string, llm: LLMProvider) {
+    this.dataDir = dataDir;
     this.fs = new FilesystemStorage(dataDir);
     this.db = new SQLiteStorage(dataDir);
     this.llm = llm;
@@ -27,7 +31,7 @@ export class WikiCompiler {
    * Run incremental compilation: process new/updated sources,
    * update affected articles, extract new concepts.
    */
-  async compile(options?: { batchSize?: number; extractConcepts?: boolean; onProgress?: (current: number, total: number, title: string) => void }): Promise<CompileResult> {
+  async compile(options?: { batchSize?: number; extractConcepts?: boolean; onProgress?: (current: number, total: number, title: string) => void; guidance?: Map<string, string> }): Promise<CompileResult> {
     const batchSize = options?.batchSize ?? 20;
     const extractConcepts = options?.extractConcepts ?? true;
 
@@ -36,6 +40,9 @@ export class WikiCompiler {
       articlesUpdated: [],
       conceptsExtracted: [],
     };
+
+    // Read user schema once for the entire compile pass
+    const schema = readSchema(this.dataDir);
 
     try {
       // 1. Get all raw sources and existing articles
@@ -91,7 +98,7 @@ export class WikiCompiler {
               return { source, articles };
             }
 
-            return { source, articles: await this.compileSource(source, rawContent, existingArticles) };
+            return { source, articles: await this.compileSource(source, rawContent, existingArticles, schema, options?.guidance?.get(source.id)) };
           })
         );
 
@@ -146,6 +153,9 @@ export class WikiCompiler {
       await this.updateBacklinks(allArticles);
       await this.updateIndex(allArticles);
 
+      // Log compilation activity
+      try { new ActivityLog(this.dataDir).logCompile(result.articlesCreated.length, result.articlesUpdated.length, result.conceptsExtracted.length); } catch { /* activity log must never block */ }
+
       return result;
     } finally {
       this.db.close();
@@ -182,19 +192,25 @@ export class WikiCompiler {
   private async compileSource(
     source: RawSource,
     content: string,
-    existingArticles: WikiArticle[]
+    existingArticles: WikiArticle[],
+    schema?: string | null,
+    userGuidance?: string
   ): Promise<WikiArticle[]> {
     const existingIndex = existingArticles
       .slice(0, 30)
       .map(a => `- ${a.slug}: ${a.frontmatter.title}`)
       .join('\n');
 
+    const guidanceSection = userGuidance
+      ? `\nUSER COMPILATION GUIDANCE (for this source only — do not apply to unrelated content):\n"${userGuidance}"\n`
+      : '';
+
     const prompt = `Compile the following raw source into wiki articles.
 
 SOURCE ID: ${source.id}
 SOURCE TITLE: ${source.title}
 SOURCE TYPE: ${source.type}
-
+${guidanceSection}
 EXISTING ARTICLES:
 ${existingIndex || '(none yet)'}
 
@@ -211,9 +227,11 @@ INSTRUCTIONS:
 5. Cite this source as [${source.id}].
 6. If the new source contradicts existing wiki content, follow the contradiction protocol in the system prompt.`;
 
+    const systemPrompt = buildCompilerSystemPrompt(schema);
+
     const response = await this.llm.chat(
       [{ role: 'user', content: prompt }],
-      { system: COMPILER_FULL_SYSTEM, maxTokens: this.estimateMaxTokens(content.length), cacheSystem: true }
+      { system: systemPrompt, maxTokens: this.estimateMaxTokens(content.length), cacheSystem: true }
     );
 
     return this.parseArticles(response.content, source.id);

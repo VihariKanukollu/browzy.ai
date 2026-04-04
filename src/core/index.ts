@@ -11,4 +11,6 @@ export { Wiki } from './wiki/index.js';
 export { ContextBuilder, calculateBudget, estimateTokens, compactConversation, checkDuplicate } from './retrieval/index.js';
 export { sanitizeUnicode, sanitizeDeep } from './sanitization.js';
 export { slugify, safePath, safeParseJSON, checkFileSize, fetchWithTimeout, clampInt } from './utils.js';
+export { ActivityLog } from './activityLog.js';
+export { readSchema, ensureSchema, schemaPath, DEFAULT_SCHEMA } from './schema.js';
 export type * from './types.js';

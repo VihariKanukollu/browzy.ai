@@ -1,6 +1,8 @@
 import { FilesystemStorage } from '../storage/filesystem.js';
 import type { LLMProvider } from '../llm/provider.js';
-import { QUERY_SYSTEM_PROMPT as SYSTEM_PROMPT, SEARCH_EXTRACTION_PROMPT, MARP_OUTPUT_PROMPT, JSON_OUTPUT_PROMPT } from '../prompts.js';
+import { QUERY_SYSTEM_PROMPT as SYSTEM_PROMPT, SEARCH_EXTRACTION_PROMPT, MARP_OUTPUT_PROMPT, JSON_OUTPUT_PROMPT, buildQuerySystemPrompt } from '../prompts.js';
+import { readSchema } from '../schema.js';
+import { ActivityLog } from '../activityLog.js';
 import { ContextBuilder } from '../retrieval/contextBuilder.js';
 import { calculateBudget } from '../retrieval/tokenCounter.js';
 import { queryCache } from '../retrieval/queryCache.js';
@@ -63,10 +65,14 @@ export class QueryEngine {
       if (cached) return cached as QueryResult;
     }
 
+    // Read user schema for query customization
+    const schema = readSchema(this.dataDir);
+    const systemPrompt = buildQuerySystemPrompt(schema);
+
     // 1. Calculate token budget
     const budget = calculateBudget(
       model,
-      SYSTEM_PROMPT,
+      systemPrompt,
       options?.conversationHistory ?? [],
     );
 
@@ -101,7 +107,7 @@ ${formatInstruction}`;
     // 4. Query the LLM
     const response = await this.llm.chat(
       [{ role: 'user', content: prompt }],
-      { system: SYSTEM_PROMPT, maxTokens: 8192 }
+      { system: systemPrompt, maxTokens: 8192 }
     );
 
     const sourcesUsed = builtContext.articlesUsed.map(a => a.article.slug);
@@ -116,6 +122,9 @@ ${formatInstruction}`;
         total: budget.contextWindow,
       },
     };
+
+    // Log query activity
+    try { new ActivityLog(this.dataDir).logQuery(question, sourcesUsed, result.confidence); } catch { /* activity log must never block */ }
 
     // 5. Cache the result for future identical queries (skip for follow-ups)
     if (!isFollowUp) {
@@ -148,9 +157,13 @@ ${formatInstruction}`;
     const format = options?.format ?? 'markdown';
     const model = options?.model ?? 'claude-sonnet-4-20250514';
 
+    // Read user schema for query customization
+    const schema = readSchema(this.dataDir);
+    const systemPrompt = buildQuerySystemPrompt(schema);
+
     const budget = calculateBudget(
       model,
-      SYSTEM_PROMPT,
+      systemPrompt,
       options?.conversationHistory ?? [],
     );
 
@@ -176,7 +189,7 @@ ${formatInstruction}`;
 
     return {
       prompt,
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt,
       sourcesUsed: builtContext.articlesUsed.map(a => a.article.slug),
       confidence: builtContext.confidence,
       gaps: builtContext.gaps,

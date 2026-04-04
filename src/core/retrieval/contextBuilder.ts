@@ -273,16 +273,25 @@ export class ContextBuilder {
    */
   private identifyGaps(_ranked: ScoredArticle[], query: string): string[] {
     const STOP_WORDS = new Set([
+      // Articles, prepositions, conjunctions
       'the', 'a', 'an', 'is', 'are', 'was', 'were', 'in', 'on', 'at',
       'to', 'for', 'of', 'and', 'or', 'but', 'not', 'with', 'this',
       'that', 'it', 'from', 'by', 'as', 'be', 'has', 'had', 'have',
       'do', 'does', 'did', 'will', 'would', 'could', 'should', 'what',
       'how', 'why', 'when', 'where', 'who', 'which', 'can', 'me', 'my',
       'i', 'you', 'your', 'we', 'they', 'them', 'about',
+      // Greetings and conversational filler — NEVER knowledge gaps
+      'hello', 'hi', 'hey', 'thanks', 'thank', 'please', 'okay', 'yes',
+      'no', 'sure', 'well', 'just', 'like', 'know', 'think', 'want',
+      'need', 'tell', 'show', 'help', 'give', 'make', 'good', 'great',
+      'much', 'many', 'some', 'more', 'also', 'very', 'really', 'here',
+      'there', 'then', 'than', 'been', 'being', 'into', 'over', 'each',
+      'between', 'after', 'before', 'other', 'such', 'only', 'same',
     ]);
 
     const terms = query.toLowerCase().split(/\s+/)
-      .filter(t => t.length > 3 && !STOP_WORDS.has(t));
+      .map(t => t.replace(/[^a-z0-9-]/g, '')) // strip punctuation
+      .filter(t => t.length > 4 && !STOP_WORDS.has(t)); // min 5 chars (was 3)
 
     const gaps: string[] = [];
     for (const term of terms) {

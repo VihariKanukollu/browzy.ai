@@ -2,6 +2,7 @@ import { readFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import type { BrowzyConfig } from './types.js';
+import { ensureSchema } from './schema.js';
 
 const DEFAULT_DATA_DIR = join(homedir(), '.browzy', 'default');
 
@@ -100,4 +101,6 @@ export function ensureDataDirs(config: BrowzyConfig): void {
   for (const dir of dirs) {
     mkdirSync(dir, { recursive: true });
   }
+  // Ensure schema file exists (creates default template if missing)
+  try { ensureSchema(config.dataDir); } catch { /* best-effort */ }
 }
