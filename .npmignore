@@ -10,6 +10,9 @@ browzy.config.json
 *.db-wal
 *.db-shm
 
+# Tests
+tests/
+
 # Source maps
 *.map
 

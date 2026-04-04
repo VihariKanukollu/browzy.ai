@@ -15,7 +15,7 @@ import { StatusBar } from './components/StatusBar.js';
 import { renderMarkdown } from './components/Markdown.js';
 import { useHistory } from './hooks/useHistory.js';
 import { useAutocomplete } from './hooks/useAutocomplete.js';
-import { useSession } from './hooks/useSession.js';
+import { useSession, loadSessionMeta, updateSessionMetaDigest } from './hooks/useSession.js';
 import {
   updateStreak, recordSourceAdded, recordQuery, checkMilestones, loadStreak,
   getThinkingMessage, getIngestingMessage, getCompilingMessage, getHealthMessage,
@@ -29,7 +29,10 @@ import { QueryEngine } from '../core/query/index.js';
 import { WikiLinter } from '../core/lint/index.js';
 import { Wiki } from '../core/wiki/index.js';
 import { compactConversation } from '../core/retrieval/index.js';
-import { QUERY_SYSTEM_PROMPT, CONVERSATION_CONTEXT_PROMPT } from '../core/prompts.js';
+import { resolveGap } from '../core/discovery/index.js';
+import { QUERY_SYSTEM_PROMPT, CONVERSATION_CONTEXT_PROMPT, SESSION_DIGEST_PROMPT } from '../core/prompts.js';
+import { generateSessionDigest } from '../core/query/digest.js';
+import { crystallize } from '../core/query/crystallizer.js';
 import type { BrowzyConfig, LintIssue } from '../core/types.js';
 import type { LLMProvider } from '../core/llm/provider.js';
 import type { OutputFormat } from '../core/query/index.js';
@@ -87,6 +90,8 @@ export const BrowzyApp: React.FC = () => {
   const [stashedInput, setStashedInput] = useState<string | null>(null);
   const [currentModel, setCurrentModel] = useState('');
   const [lastModelList, setLastModelList] = useState<Array<{ id: string; display_name: string }>>([]);
+  const [crystallizedThisSession, setCrystallizedThisSession] = useState(false);
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>('markdown');
 
   // Refs
   const inputRef = useRef(input);
@@ -122,6 +127,72 @@ export const BrowzyApp: React.FC = () => {
     }
   });
 
+  // Session memory — load last session meta and compute growth delta
+  const [sessionMemory] = useState(() => {
+    const meta = loadSessionMeta();
+    if (!meta) return { digest: undefined, growthDelta: undefined };
+
+    // Compute growth delta
+    const growthDelta = {
+      articles: stats.articles - meta.articleCount,
+      sources: stats.sources - meta.sourceCount,
+    };
+
+    // Load digest if it exists
+    let digest: string | undefined;
+    if (meta.digestPath) {
+      try {
+        const { readFileSync, existsSync } = require('fs') as typeof import('fs');
+        if (existsSync(meta.digestPath)) {
+          digest = readFileSync(meta.digestPath, 'utf-8').trim();
+        }
+      } catch { /* ignore */ }
+    }
+
+    return { digest, growthDelta, meta };
+  });
+
+  // Generate digest for last session if it doesn't have one yet
+  useEffect(() => {
+    if (sessionMemory.meta && !sessionMemory.digest) {
+      const lastSession = session.loadLastSession();
+      if (lastSession && lastSession.id === sessionMemory.meta.sessionId) {
+        const userMessages = lastSession.messages.filter(m => m.role === 'user');
+        if (userMessages.length >= 3) {
+          // Generate digest in background — don't block startup
+          generateSessionDigest(
+            lastSession.messages.map(m => ({ role: m.role, content: m.content })),
+            llm,
+          ).then(digestText => {
+            const { writeFileSync, mkdirSync } = require('fs') as typeof import('fs');
+            const { join } = require('path') as typeof import('path');
+            const { homedir } = require('os') as typeof import('os');
+            const sessionsDir = join(homedir(), '.browzy', 'sessions');
+            mkdirSync(sessionsDir, { recursive: true });
+
+            // Save digest file
+            const digestPath = join(sessionsDir, `${lastSession.id}-digest.txt`);
+            writeFileSync(digestPath, digestText, 'utf-8');
+            updateSessionMetaDigest(digestPath);
+
+            // Save as wiki article
+            const date = new Date().toISOString().slice(0, 10);
+            try {
+              const { FilesystemStorage } = require('../core/storage/filesystem.js');
+              const fs = new FilesystemStorage(config.dataDir);
+              fs.writeArticle(`session-${date}`, {
+                title: `Session Digest — ${date}`,
+                tags: ['session-digest'],
+                summary: digestText.slice(0, 120),
+                sources: [],
+              }, digestText);
+            } catch { /* wiki article is optional */ }
+          }).catch(() => { /* digest generation failed, not critical */ });
+        }
+      }
+    }
+  }, []);
+
   // Welcome & streak — computed once with stats available
   const [welcomeMsg] = useState(() => {
     updateStreak();
@@ -147,10 +218,30 @@ export const BrowzyApp: React.FC = () => {
     return () => clearInterval(timer);
   }, [loading]);
 
-  // Save session on unmount
+  // Save session + meta on unmount AND on process signals
+  // React cleanup only runs if the framework has time to unmount.
+  // Terminal close (SIGTERM/SIGHUP) and Ctrl+C (SIGINT) kill the process
+  // before React cleans up, so we need process-level handlers too.
+  const savedRef = useRef(false);
+  const saveOnce = useCallback(() => {
+    if (savedRef.current) return;
+    savedRef.current = true;
+    session.saveSession();
+    session.saveSessionMeta(stats);
+  }, [session, stats]);
+
   useEffect(() => {
-    return () => { session.saveSession(); };
-  }, []);
+    const handler = () => { saveOnce(); process.exit(0); };
+    process.on('SIGINT', handler);
+    process.on('SIGTERM', handler);
+    process.on('SIGHUP', handler);
+    return () => {
+      saveOnce();
+      process.removeListener('SIGINT', handler);
+      process.removeListener('SIGTERM', handler);
+      process.removeListener('SIGHUP', handler);
+    };
+  }, [saveOnce]);
 
   // ── Streaming with throttle ─────────────────────────────────
 
@@ -175,7 +266,7 @@ export const BrowzyApp: React.FC = () => {
 
       // Build context
       const engine = new QueryEngine(config.dataDir, llm);
-      const fullResult = await engine.query(question, { format: 'markdown' as OutputFormat, save: false });
+      const fullResult = await engine.query(question, { format: outputFormat, save: false });
 
       // Now stream via provider
       let finalText = '';
@@ -221,6 +312,29 @@ export const BrowzyApp: React.FC = () => {
       setStreamingText('');
       session.addMessage('assistant', finalText || fullResult.answer, fullResult.sourcesUsed);
 
+      // Insight Crystallizer — fire and forget, max 1 per session
+      if (!crystallizedThisSession && fullResult.sourcesUsed.length >= 2) {
+        try {
+          const wikiForCrystal = new Wiki(config.dataDir);
+          const sourceContents = fullResult.sourcesUsed.slice(0, 5).map(slug => {
+            const article = wikiForCrystal.getArticle(slug);
+            return article ? { slug, content: article.content } : null;
+          }).filter(Boolean) as Array<{ slug: string; content: string }>;
+          wikiForCrystal.close();
+
+          if (sourceContents.length >= 2) {
+            crystallize(question, finalText || fullResult.answer, fullResult.sourcesUsed, sourceContents, config.dataDir, llm)
+              .then(result => {
+                if (result.saved) {
+                  setCrystallizedThisSession(true);
+                  setTempStatus(prev => prev ? `${prev} · insight drafted` : 'insight drafted');
+                }
+              })
+              .catch(() => { /* silently fail */ });
+          }
+        } catch { /* silently fail */ }
+      }
+
       // Show confidence + gaps
       const rewardParts = [getQueryReward(fullResult.sourcesUsed.length)];
       if (fullResult.confidence === 'low') {
@@ -230,6 +344,15 @@ export const BrowzyApp: React.FC = () => {
         rewardParts.push(`Try /add to cover: ${fullResult.gaps.join(', ')}`);
       }
       setTempStatus(rewardParts.filter(Boolean).join(' '));
+
+      // Gap Hunter: fire-and-forget resolution for the first gap
+      if (fullResult.gaps && fullResult.gaps.length > 0) {
+        resolveGap(fullResult.gaps[0]).then(suggestion => {
+          if (suggestion && !loadingRef.current) {
+            session.addMessage('system', `Gap: "${fullResult.gaps[0]}" — found "${suggestion.title}" (${suggestion.url}). Type /add ${suggestion.url} to fill this gap.`);
+          }
+        }).catch(() => { /* silently ignore */ });
+      }
 
       // Check for milestones
       const milestone = checkMilestones(stats);
@@ -261,7 +384,7 @@ export const BrowzyApp: React.FC = () => {
 
     setLoading(false);
     refreshStats();
-  }, [llm, config, session, refreshStats, stats]);
+  }, [llm, config, session, refreshStats, stats, outputFormat]);
 
   // ── Commands ────────────────────────────────────────────────
 
@@ -500,16 +623,79 @@ export const BrowzyApp: React.FC = () => {
         const path = session.exportSession(join(config.dataDir, 'output', safe));
         session.addMessage('system', `Saved to ${path}. Your research, preserved.`); break;
       }
+      case '/search': {
+        if (!args) { session.addMessage('system', 'Usage: /search <term>'); break; }
+        try {
+          const wiki = new Wiki(config.dataDir);
+          const results = wiki.search(args, 10);
+          wiki.close();
+          if (results.length === 0) {
+            session.addMessage('system', `No articles matching "${args}".`);
+          } else {
+            const formatted = results.map((r, i) =>
+              `  ${i + 1}. [[${r.slug}]] — ${r.title}\n     ${r.snippet || ''}`
+            ).join('\n');
+            session.addMessage('system', `Found ${results.length} articles:\n${formatted}`);
+          }
+        } catch (err: any) {
+          session.addMessage('system', `Search error: ${err.message}`);
+        }
+        break;
+      }
+      case '/format': {
+        if (!args) {
+          session.addMessage('system', `Current format: ${outputFormat}. Options: markdown, marp, json`);
+          break;
+        }
+        const fmt = args.toLowerCase().trim();
+        if (['markdown', 'marp', 'json'].includes(fmt)) {
+          setOutputFormat(fmt as OutputFormat);
+          session.addMessage('system', `Output format set to: ${fmt}`);
+        } else {
+          session.addMessage('system', `Unknown format "${fmt}". Options: markdown, marp, json`);
+        }
+        break;
+      }
+      case '/copy': {
+        const lastAssistant = [...session.messages].reverse().find(m => m.role === 'assistant');
+        if (!lastAssistant) {
+          session.addMessage('system', 'Nothing to copy — ask a question first.');
+          break;
+        }
+        try {
+          const platform = process.platform;
+          if (platform === 'darwin') {
+            execSync('pbcopy', { input: lastAssistant.content });
+          } else if (platform === 'win32') {
+            execSync('clip', { input: lastAssistant.content });
+          } else {
+            // Linux — try xclip, then xsel
+            try {
+              execSync('xclip -selection clipboard', { input: lastAssistant.content });
+            } catch {
+              execSync('xsel --clipboard --input', { input: lastAssistant.content });
+            }
+          }
+          session.addMessage('system', 'Copied to clipboard.');
+        } catch {
+          session.addMessage('system', 'Could not copy — clipboard tool not found. Install xclip (Linux) or try manually.');
+        }
+        break;
+      }
       case '/help':
         session.addMessage('system', [
           'Just type a question — your browzy will find the answer.',
           '',
-          '/add <sources...>     Feed your browzy new knowledge',
-          '/model [model-id]     Switch models',
+          '/add <sources...>     Feed your browzy (URLs, PDFs, images, .md, .txt)',
+          '/search <term>        Find articles in your browzy',
+          '/format <type>        Output format: markdown, marp, json',
+          '/copy                 Copy last answer to clipboard',
           '/health               How is your browzy doing?',
-          '/rebuild              Recompile from scratch',
-          '/export [file]        Save this session as markdown',
-          '/quit                 Exit (your browzy remembers everything)',
+          '/model <provider>     Switch LLM model',
+          '/export               Save session to file',
+          '/rebuild              Force recompilation',
+          '/clear                Clear conversation',
+          '/help                 Show this help',
           '',
           'Keys: Tab complete · ↑↓ history · Ctrl+E editor · Ctrl+S stash',
         ].join('\n'));
@@ -521,7 +707,7 @@ export const BrowzyApp: React.FC = () => {
         break;
       default: session.addMessage('system', `Hmm, I don't know "${cmd}". Type /help to see what I can do.`);
     }
-  }, [llm, config, session, refreshStats, handleQuery, exit]);
+  }, [llm, config, session, refreshStats, handleQuery, exit, outputFormat]);
 
   const handleSubmit = useCallback(async (value: string) => {
     const trimmed = value.trim();
@@ -551,7 +737,7 @@ export const BrowzyApp: React.FC = () => {
     history.addToHistory(trimmed);
 
     let normalized = trimmed.replace(/^browzy\s+/i, '');
-    const cmds = ['add', 'health', 'rebuild', 'model', 'export', 'help', 'quit', 'exit', 'q'];
+    const cmds = ['add', 'search', 'format', 'copy', 'health', 'rebuild', 'model', 'export', 'help', 'quit', 'exit', 'q', 'clear'];
     const first = normalized.split(/\s+/)[0].toLowerCase().replace(/^\//, '');
     if (cmds.includes(first)) normalized = '/' + (normalized.startsWith('/') ? normalized.slice(1) : normalized);
 
@@ -633,7 +819,7 @@ export const BrowzyApp: React.FC = () => {
           if (item.type === 'banner') {
             return (
               <Box key="banner">
-                <Banner welcome={welcomeMsg} stats={stats} model={config.llm.model || 'default'} dataDir={config.dataDir} />
+                <Banner welcome={welcomeMsg} stats={stats} model={config.llm.model || 'default'} dataDir={config.dataDir} lastSessionDigest={sessionMemory.digest} growthDelta={sessionMemory.growthDelta} />
               </Box>
             );
           }

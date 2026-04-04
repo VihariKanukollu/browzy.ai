@@ -16,6 +16,28 @@ export interface StreamChunk {
   snapshot: string;
 }
 
+/**
+ * Format message content for the Anthropic API.
+ * Handles both plain text and multimodal (text + image) content.
+ */
+function formatContentForAnthropic(content: string | Array<{ type: string; [key: string]: any }>): any {
+  if (typeof content === 'string') return content;
+
+  // Multimodal: convert our types to Anthropic's format
+  return content.map(block => {
+    if (block.type === 'text') {
+      return { type: 'text', text: block.text };
+    }
+    if (block.type === 'image') {
+      return {
+        type: 'image',
+        source: block.source,
+      };
+    }
+    return block;
+  });
+}
+
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 
@@ -69,18 +91,22 @@ class ClaudeProvider implements LLMProvider {
     const { default: Anthropic } = await import('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: this.config.apiKey });
 
-    const systemMsg = options?.system ?? messages.find(m => m.role === 'system')?.content;
+    const systemContent = messages.find(m => m.role === 'system')?.content;
+    const systemMsg = options?.system ?? (typeof systemContent === 'string' ? systemContent : undefined);
     const nonSystemMessages = messages
       .filter(m => m.role !== 'system')
-      .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }));
+      .map(m => ({
+        role: m.role as 'user' | 'assistant',
+        content: formatContentForAnthropic(m.content),
+      }));
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         const response = await client.messages.create({
           model: this.config.model || 'claude-sonnet-4-20250514',
           max_tokens: options?.maxTokens ?? 4096,
-          ...(systemMsg ? { system: systemMsg } : {}),
-          messages: nonSystemMessages,
+          ...(systemMsg ? { system: systemMsg as string } : {}),
+          messages: nonSystemMessages as any,
         });
 
         const textBlock = response.content.find(b => b.type === 'text');
@@ -110,13 +136,16 @@ class ClaudeProvider implements LLMProvider {
     const systemMsg = options?.system ?? messages.find(m => m.role === 'system')?.content;
     const nonSystemMessages = messages
       .filter(m => m.role !== 'system')
-      .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }));
+      .map(m => ({
+        role: m.role as 'user' | 'assistant',
+        content: formatContentForAnthropic(m.content),
+      }));
 
     const stream = client.messages.stream({
       model: this.config.model || 'claude-sonnet-4-20250514',
       max_tokens: options?.maxTokens ?? 4096,
-      ...(systemMsg ? { system: systemMsg } : {}),
-      messages: nonSystemMessages,
+      ...(systemMsg ? { system: systemMsg as string } : {}),
+      messages: nonSystemMessages as any,
     });
 
     let accumulated = '';
@@ -154,7 +183,7 @@ class OpenAIProvider implements LLMProvider {
         const response = await client.chat.completions.create({
           model: this.config.model || 'gpt-4o',
           max_tokens: options?.maxTokens ?? 4096,
-          messages: allMessages.map(m => ({ role: m.role, content: m.content })),
+          messages: allMessages.map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })) as any,
         });
 
         return {
@@ -190,7 +219,7 @@ class OpenAIProvider implements LLMProvider {
       model: this.config.model || 'gpt-4o',
       max_tokens: options?.maxTokens ?? 4096,
       stream: true,
-      messages: allMessages.map(m => ({ role: m.role, content: m.content })),
+      messages: allMessages.map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })) as any,
     });
 
     let accumulated = '';
@@ -245,7 +274,7 @@ class OpenRouterProvider implements LLMProvider {
         const response = await client.chat.completions.create({
           model: this.config.model || 'anthropic/claude-sonnet-4',
           max_tokens: options?.maxTokens ?? 4096,
-          messages: allMessages.map(m => ({ role: m.role, content: m.content })),
+          messages: allMessages.map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })) as any,
         });
 
         return {
@@ -280,7 +309,7 @@ class OpenRouterProvider implements LLMProvider {
       model: this.config.model || 'anthropic/claude-sonnet-4',
       max_tokens: options?.maxTokens ?? 4096,
       stream: true,
-      messages: allMessages.map(m => ({ role: m.role, content: m.content })),
+      messages: allMessages.map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })) as any,
     });
 
     let accumulated = '';

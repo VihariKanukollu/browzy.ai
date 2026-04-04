@@ -48,6 +48,10 @@ class QueryCache<T = any> {
       return undefined;
     }
 
+    // Promote to most-recently-used (move to end of Map)
+    this.cache.delete(key);
+    this.cache.set(key, entry);
+
     return entry.value;
   }
 

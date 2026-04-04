@@ -26,6 +26,8 @@ export interface RawSource {
   summary?: string;
   /** Extracted tags/topics */
   tags?: string[];
+  /** SHA-256 hash of original file content (for dedup without re-reading) */
+  contentHash?: string;
 }
 
 // ── Wiki ─────────────────────────────────────────────────────────
@@ -73,9 +75,23 @@ export interface LLMConfig {
   model?: string;
 }
 
+export interface ImageContent {
+  type: 'image';
+  source: {
+    type: 'base64';
+    media_type: string;
+    data: string;
+  };
+}
+
+export interface TextContent {
+  type: 'text';
+  text: string;
+}
+
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: string | Array<TextContent | ImageContent>;
 }
 
 export interface LLMResponse {

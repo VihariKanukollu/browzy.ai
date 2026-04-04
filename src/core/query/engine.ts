@@ -46,9 +46,12 @@ export class QueryEngine {
     const save = options?.save ?? false;
     const model = options?.model ?? 'claude-sonnet-4-20250514';
 
-    // Check query cache for identical prior result
-    const cached = queryCache.get(question, format, model);
-    if (cached) return cached as QueryResult;
+    // Check query cache for identical prior result (skip for follow-ups)
+    const isFollowUp = options?.followUp;
+    if (!isFollowUp) {
+      const cached = queryCache.get(question, format, model);
+      if (cached) return cached as QueryResult;
+    }
 
     // 1. Calculate token budget
     const budget = calculateBudget(
@@ -104,8 +107,10 @@ ${formatInstruction}`;
       },
     };
 
-    // 5. Cache the result for future identical queries
-    queryCache.set(question, format, model, result);
+    // 5. Cache the result for future identical queries (skip for follow-ups)
+    if (!isFollowUp) {
+      queryCache.set(question, format, model, result);
+    }
 
     // 6. Save output if requested
     if (save) {

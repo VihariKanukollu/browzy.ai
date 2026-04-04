@@ -244,6 +244,10 @@ export async function ingestWeb(
       });
       if (!imgResponse.ok) continue;
 
+      // Validate Content-Type is actually an image
+      const imgContentType = imgResponse.headers.get('content-type') || '';
+      if (!imgContentType.startsWith('image/')) continue;
+
       const contentLength = parseInt(imgResponse.headers.get('content-length') || '0', 10);
       if (contentLength > MAX_IMAGE_BYTES) continue;
 

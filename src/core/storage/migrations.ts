@@ -14,9 +14,9 @@ const migrations: Migration[] = [
     up: (db) => {
       db.exec(`
         CREATE TABLE IF NOT EXISTS schema_version (
-          version INTEGER NOT NULL DEFAULT 0
+          version INTEGER PRIMARY KEY NOT NULL DEFAULT 0
         );
-        INSERT INTO schema_version (version) VALUES (1);
+        INSERT OR REPLACE INTO schema_version (version) VALUES (1);
       `);
     },
   },

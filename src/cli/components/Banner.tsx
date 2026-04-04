@@ -20,9 +20,11 @@ interface BannerProps {
   stats: { sources: number; articles: number; concepts: number };
   model: string;
   dataDir: string;
+  lastSessionDigest?: string;
+  growthDelta?: { articles: number; sources: number };
 }
 
-export const Banner: React.FC<BannerProps> = React.memo(({ welcome, stats, model, dataDir }) => {
+export const Banner: React.FC<BannerProps> = React.memo(({ welcome, stats, model, dataDir, lastSessionDigest, growthDelta }) => {
   const theme = getTheme();
   const streak = loadStreak();
 
@@ -40,7 +42,7 @@ export const Banner: React.FC<BannerProps> = React.memo(({ welcome, stats, model
       <Box marginTop={1}>
         <Text color={theme.accent}>{welcome}</Text>
       </Box>
-      <Text color={theme.textMuted}>{''.padEnd(50)}v1.0.0</Text>
+      <Text color={theme.textMuted}>{''.padEnd(50)}v1.1.0</Text>
 
       <Box marginTop={1}>
         <Text color={theme.separator}>{'─'.repeat(55)}</Text>
@@ -73,6 +75,17 @@ export const Banner: React.FC<BannerProps> = React.memo(({ welcome, stats, model
         <Text color={theme.textMuted}>model    </Text>
         <Text color={theme.text}>{model}</Text>
       </Box>
+
+      {lastSessionDigest && (
+        <Box marginTop={1}>
+          <Text>
+            <Text color={theme.textMuted}>Last time: {lastSessionDigest}</Text>
+            {growthDelta && growthDelta.articles > 0 && (
+              <Text color={theme.accent}> Your browzy grew by {growthDelta.articles} article{growthDelta.articles !== 1 ? 's' : ''} since then.</Text>
+            )}
+          </Text>
+        </Box>
+      )}
 
       <Box marginTop={1}>
         <Text color={theme.separator}>{'─'.repeat(55)}</Text>

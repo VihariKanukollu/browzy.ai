@@ -66,6 +66,12 @@ export async function ingest(
       throw new Error(`Unsupported source type: ${type}`);
   }
 
+  // Store content hash for file-based sources (enables fast dedup without re-reading)
+  if (type !== 'web') {
+    const { hashFileContent } = await import('../retrieval/deduplicator.js');
+    source.contentHash = hashFileContent(input);
+  }
+
   // If re-ingesting, warn and preserve original timestamp
   if (existingSource) {
     console.warn(`⚠ Updating existing source: ${existingSource.title}. Re-compile to update the article.`);

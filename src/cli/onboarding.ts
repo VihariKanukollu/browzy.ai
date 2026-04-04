@@ -304,8 +304,10 @@ export async function runOnboarding(): Promise<boolean> {
   };
   saveProfile(profile);
 
-  // Write config
-  const configPath = join(process.cwd(), 'browzy.config.json');
+  // Write config to ~/.browzy/config.json
+  const browzyDir = join(homedir(), '.browzy');
+  mkdirSync(browzyDir, { recursive: true });
+  const configPath = join(browzyDir, 'config.json');
   if (!existsSync(configPath)) {
     const config = {
       dataDir,
@@ -321,9 +323,9 @@ export async function runOnboarding(): Promise<boolean> {
     writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
   }
 
-  // Write .env if key was provided and not in env
+  // Write .env to ~/.browzy/.env if key was provided and not in env
   if (apiKey && !existingKey) {
-    const envPath = join(process.cwd(), '.env');
+    const envPath = join(browzyDir, '.env');
     if (existsSync(envPath)) {
       appendFileSync(envPath, `\nANTHROPIC_API_KEY=${apiKey}\n`);
     } else {

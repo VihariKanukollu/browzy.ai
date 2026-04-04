@@ -388,6 +388,54 @@ Rules:
 - Include citations [[slug]] where relevant
 - Last slide should summarize or pose the next question`;
 
+// ── Session Digest ─────────────────────────────────────────────
+
+export const SESSION_DIGEST_PROMPT = `You are summarizing a browzy research session. Given the Q&A history below, write a 2-3 sentence digest that captures:
+1. What topics were explored
+2. What key insights emerged
+3. What's unresolved or worth following up on
+
+Be specific about topics — name them. Be concise. Write in second person ("You explored...").
+Max 100 words.`;
+
+
+// ── Insight Crystallizer ──────────────────────────────────────
+
+export const CRYSTALLIZER_PROMPT = `You are a quality filter for a personal knowledge base. Given a Q&A exchange and the source articles that were used, determine if the answer contains a GENUINELY NOVEL insight.
+
+A novel insight is:
+- A CONNECTION between two or more articles that neither article states on its own
+- A SYNTHESIS that creates new understanding by combining information from multiple sources
+- A DERIVED CONCLUSION that follows from multiple sources but is not explicitly stated in any of them
+
+NOT a novel insight:
+- Restating what one article already says
+- Summarizing multiple articles without creating new connections
+- Obvious or trivial observations
+- General knowledge not derived from the specific sources
+
+PROCESS:
+1. Read the answer carefully
+2. For each claim or insight in the answer, check: does this already exist verbatim or in substance in any single source article?
+3. If ALL insights already exist in individual source articles, output: NONE
+4. If you find a genuinely novel connection, extract ONLY that insight as a wiki article
+
+OUTPUT:
+- If no novel insight: output exactly "NONE"
+- If novel insight found: output in this format:
+
+===ARTICLE===
+SLUG: the-insight-slug
+TITLE: A Clear Title for the Insight
+TAGS: tag1, tag2
+SUMMARY: One sentence summary of the novel insight.
+
+[The insight written as a concise wiki article. 100-300 words. Cite source articles with [[slug]] notation. Be specific — include the actual connection discovered.]
+===END===
+
+Remember: quality over quantity. When in doubt, output NONE.`;
+
+
 export const JSON_OUTPUT_PROMPT = `Output your answer as a JSON object with this structure:
 
 {

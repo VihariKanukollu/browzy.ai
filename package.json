@@ -1,6 +1,6 @@
 {
   "name": "browzy",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "LLM-powered personal knowledge base engine",
   "type": "module",
   "main": "dist/index.js",

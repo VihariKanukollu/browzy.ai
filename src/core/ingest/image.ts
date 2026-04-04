@@ -40,7 +40,20 @@ export async function ingestImage(
         [
           {
             role: 'user',
-            content: `Describe this image in detail. The image is: ${title}`,
+            content: [
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: mimeType,
+                  data: imageData,
+                },
+              },
+              {
+                type: 'text',
+                text: `Describe this image in detail. The image is: ${title}`,
+              },
+            ],
           },
         ],
         { system: IMAGE_DESCRIPTION_PROMPT }

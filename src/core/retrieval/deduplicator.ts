@@ -88,11 +88,14 @@ export function checkDuplicate(
       };
     }
 
-    // Also check content hash for files with different paths but same content
+    // Also check content hash for files with different paths but same content.
+    // Use cached contentHash from manifest entries instead of re-reading every file.
     if (existsSync(input)) {
       const hash = hashFileContent(input);
       const contentMatch = manifest.find(s => {
         if (s.type === 'web') return false;
+        // Use stored contentHash when available; fall back to re-hashing
+        if (s.contentHash) return s.contentHash === hash;
         if (!existsSync(s.origin)) return false;
         return hashFileContent(s.origin) === hash;
       });

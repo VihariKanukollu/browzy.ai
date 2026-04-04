@@ -3,10 +3,14 @@ import type { Suggestion } from '../components/Suggestions.js';
 
 const COMMANDS: Suggestion[] = [
   { name: '/add', description: 'Feed your browzy new knowledge', usage: '/add <urls or paths...>' },
+  { name: '/search', description: 'Find articles in your browzy', usage: '/search <term>' },
+  { name: '/format', description: 'Output format: markdown, marp, json', usage: '/format <type>' },
+  { name: '/copy', description: 'Copy last answer to clipboard' },
   { name: '/health', description: 'How is your browzy doing?' },
   { name: '/model', description: 'Switch models', usage: '/model [model-id]' },
   { name: '/rebuild', description: 'Recompile from scratch' },
   { name: '/export', description: 'Save this session as markdown' },
+  { name: '/clear', description: 'Clear conversation' },
   { name: '/help', description: 'All commands' },
   { name: '/quit', description: 'Exit' },
 ];

@@ -60,45 +60,46 @@ export class ContextBuilder {
       excludeSlugs?: Set<string>;  // For follow-up: exclude already-shown articles
     }
   ): BuiltContext {
-    const budget = options?.articleBudget ?? DEFAULT_ARTICLE_BUDGET;
-    const excludeSlugs = options?.excludeSlugs ?? new Set<string>();
+    try {
+      const budget = options?.articleBudget ?? DEFAULT_ARTICLE_BUDGET;
+      const excludeSlugs = options?.excludeSlugs ?? new Set<string>();
 
-    // 1. Get candidate articles via FTS
-    const candidates = this.getCandidates(query);
+      // 1. Get candidate articles via FTS
+      const candidates = this.getCandidates(query);
 
-    // 2. Filter out excluded slugs (for follow-up queries)
-    const filtered = candidates.filter(a => !excludeSlugs.has(a.slug));
+      // 2. Filter out excluded slugs (for follow-up queries)
+      const filtered = candidates.filter(a => !excludeSlugs.has(a.slug));
 
-    if (filtered.length === 0) {
-      try { this.db.close(); } catch { /* already closed */ }
+      if (filtered.length === 0) {
+        return {
+          context: 'No relevant articles found in your browzy. Try adding sources with /add.',
+          articlesUsed: [],
+          tokenCount: 0,
+          confidence: 'low',
+          gaps: [query],
+        };
+      }
+
+      // 3. Rank by relevance
+      const ranked = rankArticles(filtered, query, MAX_ARTICLES);
+
+      // 4. Build context within budget
+      const { context, used, totalTokens } = this.assembleContext(ranked, query, budget);
+
+      // 5. Assess confidence
+      const confidence = this.assessConfidence(ranked, query);
+      const gaps = this.identifyGaps(ranked, query);
+
       return {
-        context: 'No relevant articles found in your browzy. Try adding sources with /add.',
-        articlesUsed: [],
-        tokenCount: 0,
-        confidence: 'low',
-        gaps: [query],
+        context,
+        articlesUsed: used,
+        tokenCount: totalTokens,
+        confidence,
+        gaps,
       };
+    } finally {
+      try { this.db.close(); } catch { /* ignore close errors */ }
     }
-
-    // 3. Rank by relevance
-    const ranked = rankArticles(filtered, query, MAX_ARTICLES);
-
-    // 4. Build context within budget
-    const { context, used, totalTokens } = this.assembleContext(ranked, query, budget);
-
-    // 5. Assess confidence
-    const confidence = this.assessConfidence(ranked, query);
-    const gaps = this.identifyGaps(ranked, query);
-
-    try { this.db.close(); } catch { /* already closed */ }
-
-    return {
-      context,
-      articlesUsed: used,
-      tokenCount: totalTokens,
-      confidence,
-      gaps,
-    };
   }
 
   /**
@@ -174,18 +175,18 @@ export class ContextBuilder {
       // include only the most relevant complete sections instead of hard-cutting.
       if (estimateTokens(articleContent) > MAX_TOKENS_PER_ARTICLE) {
         // Use already-scored matchedSections when available; otherwise extract fresh
-        let sections: ArticleSection[];
+        let articleSections: ArticleSection[];
         if (scored.matchedSections.length > 0) {
-          sections = scored.matchedSections;
+          articleSections = scored.matchedSections;
         } else {
-          sections = extractSections(article.content);
+          articleSections = extractSections(article.content);
         }
 
         let selectedContent = '';
         let usedTokens = 0;
 
         // Always include intro section first
-        const intro = sections.find(s => s.header === '(intro)');
+        const intro = articleSections.find(s => s.header === '(intro)');
         if (intro) {
           const introText = intro.content.trim();
           if (introText.length > 0) {
@@ -195,7 +196,7 @@ export class ContextBuilder {
         }
 
         // Add remaining sections in descending relevance order
-        const remaining = sections
+        const remaining = articleSections
           .filter(s => s !== intro)
           .sort((a, b) => b.relevanceScore - a.relevanceScore);
 
@@ -214,7 +215,7 @@ export class ContextBuilder {
         articleContent = selectedContent.trim();
 
         // Indicate omitted sections
-        if (includedCount < sections.length) {
+        if (includedCount < articleSections.length) {
           articleContent += '\n\n[...some sections omitted for relevance]';
         }
       }

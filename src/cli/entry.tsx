@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 
-import 'dotenv/config';
+import dotenv from 'dotenv';
+import { join } from 'path';
+import { homedir } from 'os';
+
+// Load .env from ~/.browzy/.env first (global), then cwd/.env (local override)
+dotenv.config({ path: join(homedir(), '.browzy', '.env') });
+dotenv.config(); // cwd/.env — won't overwrite already-set vars
+
 import React from 'react';
 import { render } from 'ink';
 import { Command } from 'commander';

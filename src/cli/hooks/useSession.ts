@@ -5,6 +5,7 @@ import { homedir } from 'os';
 import type { MessageData } from '../components/Message.js';
 
 const SESSIONS_DIR = join(homedir(), '.browzy', 'sessions');
+const META_PATH = join(SESSIONS_DIR, 'last-session-meta.json');
 const MAX_SESSIONS = 50;
 
 export interface Session {
@@ -12,6 +13,39 @@ export interface Session {
   messages: MessageData[];
   createdAt: string;
   lastUpdated: string;
+}
+
+export interface SessionMeta {
+  sessionId: string;
+  articleCount: number;
+  sourceCount: number;
+  conceptCount: number;
+  digestPath?: string;
+  savedAt: string;
+}
+
+/**
+ * Load the last session's metadata (stats snapshot + digest path).
+ */
+export function loadSessionMeta(): SessionMeta | null {
+  try {
+    if (!existsSync(META_PATH)) return null;
+    return JSON.parse(readFileSync(META_PATH, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Update the meta file with a digest path after generation.
+ */
+export function updateSessionMetaDigest(digestPath: string): void {
+  try {
+    const meta = loadSessionMeta();
+    if (!meta) return;
+    meta.digestPath = digestPath;
+    writeFileSync(META_PATH, JSON.stringify(meta, null, 2), 'utf-8');
+  } catch { /* ignore */ }
 }
 
 function generateId(): string {
@@ -71,7 +105,7 @@ export function useSession() {
     // Prune old sessions — sort by mtime, keep newest
     try {
       const files = readdirSync(SESSIONS_DIR)
-        .filter(f => f.endsWith('.json') && !f.endsWith('.tmp'))
+        .filter(f => f.endsWith('.json') && !f.endsWith('.tmp') && f !== 'last-session-meta.json')
         .map(f => ({
           name: f,
           mtime: statSync(join(SESSIONS_DIR, f)).mtimeMs,
@@ -84,11 +118,26 @@ export function useSession() {
     } catch { /* ignore */ }
   }, [sessionId, messages]);
 
+  const saveSessionMeta = useCallback((stats: { articles: number; sources: number; concepts: number }) => {
+    if (messages.length === 0) return;
+    mkdirSync(SESSIONS_DIR, { recursive: true });
+    const meta: SessionMeta = {
+      sessionId,
+      articleCount: stats.articles,
+      sourceCount: stats.sources,
+      conceptCount: stats.concepts,
+      savedAt: new Date().toISOString(),
+    };
+    try {
+      writeFileSync(META_PATH, JSON.stringify(meta, null, 2), 'utf-8');
+    } catch { /* ignore */ }
+  }, [sessionId, messages]);
+
   const loadLastSession = useCallback((): Session | null => {
     try {
       if (!existsSync(SESSIONS_DIR)) return null;
       const files = readdirSync(SESSIONS_DIR)
-        .filter(f => f.endsWith('.json') && !f.endsWith('.tmp'))
+        .filter(f => f.endsWith('.json') && !f.endsWith('.tmp') && f !== 'last-session-meta.json')
         .map(f => ({
           name: f,
           mtime: statSync(join(SESSIONS_DIR, f)).mtimeMs,
@@ -138,6 +187,7 @@ export function useSession() {
     addMessage,
     setMessages,
     saveSession,
+    saveSessionMeta,
     loadLastSession,
     exportSession,
   };
