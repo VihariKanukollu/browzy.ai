@@ -232,8 +232,8 @@ export async function runOnboarding(): Promise<boolean> {
     apiKey = await askSecret(rl, p('  › '));
     if (!apiKey) {
       console.log(dim('  Skipped — you can set ANTHROPIC_API_KEY later in .env'));
-    } else if (!apiKey.startsWith('sk-ant-')) {
-      console.log(chalk.yellow('  ⚠ ') + 'Key doesn\'t look like an Anthropic key (expected sk-ant-... prefix)');
+    } else if (!apiKey.startsWith('sk-')) {
+      console.log(chalk.yellow('  ⚠ ') + 'Key doesn\'t look like an Anthropic key (expected sk-... prefix)');
       console.log(dim('    Saving anyway — update in .env if this was a mistake'));
     }
   }
@@ -327,7 +327,11 @@ export async function runOnboarding(): Promise<boolean> {
   if (apiKey && !existingKey) {
     const envPath = join(browzyDir, '.env');
     if (existsSync(envPath)) {
-      appendFileSync(envPath, `\nANTHROPIC_API_KEY=${apiKey}\n`);
+      // Check if ANTHROPIC_API_KEY already exists before appending
+      const existingEnv = readFileSync(envPath, 'utf-8');
+      if (!existingEnv.includes('ANTHROPIC_API_KEY=')) {
+        appendFileSync(envPath, `\nANTHROPIC_API_KEY=${apiKey}\n`);
+      }
     } else {
       writeFileSync(envPath, `ANTHROPIC_API_KEY=${apiKey}\n`, { mode: 0o600 });
     }

@@ -67,10 +67,10 @@ export interface WikiIndex {
 
 // ── LLM ──────────────────────────────────────────────────────────
 
-export type LLMProvider = 'claude' | 'openai' | 'openrouter';
+export type LLMProviderName = 'claude' | 'openai' | 'openrouter';
 
 export interface LLMConfig {
-  provider: LLMProvider;
+  provider: LLMProviderName;
   apiKey: string;
   model?: string;
 }
@@ -117,6 +117,8 @@ export interface BrowzyConfig {
     /** Whether to auto-extract concepts */
     extractConcepts: boolean;
   };
+  /** Clipboard watcher — opt-in, OFF by default */
+  clipboard?: { enabled: boolean };
 }
 
 // ── Storage ──────────────────────────────────────────────────────

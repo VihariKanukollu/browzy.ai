@@ -15,7 +15,7 @@ export async function generateSessionDigest(
     .map(m =>
       m.role === 'user'
         ? `Q: ${m.content}`
-        : `A: ${m.content.slice(0, 200)}...`,
+        : `A: ${m.content.slice(0, 200)}${m.content.length > 200 ? '...' : ''}`,
     )
     .join('\n');
 

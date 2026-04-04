@@ -4,15 +4,17 @@ import dotenv from 'dotenv';
 import { join } from 'path';
 import { homedir } from 'os';
 
-// Load .env from ~/.browzy/.env first (global), then cwd/.env (local override)
-dotenv.config({ path: join(homedir(), '.browzy', '.env') });
-dotenv.config(); // cwd/.env — won't overwrite already-set vars
+// Load .env: cwd/.env first (local project config), then ~/.browzy/.env (global fallback).
+// dotenv.config() won't overwrite already-set vars, so local takes precedence.
+dotenv.config(); // cwd/.env — local project config loaded first
+dotenv.config({ path: join(homedir(), '.browzy', '.env') }); // global fallback
 
 import React from 'react';
 import { render } from 'ink';
 import { Command } from 'commander';
 import { BrowzyApp, BrowzyErrorBoundary } from './app.js';
-import { needsOnboarding, runOnboarding } from './onboarding.js';
+// onboarding is deferred — only imported when explicitly requested via /setup
+// import { needsOnboarding, runOnboarding } from './onboarding.js';
 
 import { initCommand } from './commands/init.js';
 import { ingestCommand } from './commands/ingest.js';
@@ -35,10 +37,9 @@ process.on('unhandledRejection', (reason) => {
 
 async function main() {
   if (process.argv.length <= 2) {
-    if (needsOnboarding()) {
-      const success = await runOnboarding();
-      if (!success) process.exit(0);
-    }
+    // Onboarding is now deferred — the app seeds demo articles and prompts
+    // for an API key inline when the user first needs the LLM.
+    // The old wizard (runOnboarding) is kept for explicit /setup but never auto-runs.
 
     try {
       const { waitUntilExit } = render(

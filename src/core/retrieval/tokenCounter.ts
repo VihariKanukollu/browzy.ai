@@ -20,12 +20,13 @@ export function estimateTokens(text: string): number {
   let remaining = text;
 
   // Extract and count code blocks separately (```...```)
+  // Use replaceAll via regex to remove all occurrences in a single pass
   const codeBlockRegex = /```[\s\S]*?```/g;
   const codeBlocks = remaining.match(codeBlockRegex) || [];
   for (const block of codeBlocks) {
     totalTokens += Math.ceil(block.length / 3.5);
-    remaining = remaining.replace(block, '');
   }
+  remaining = remaining.replace(codeBlockRegex, '');
 
   // Count CJK characters (Chinese, Japanese, Korean) — roughly 2 chars per token
   const cjkRegex = /[\u3000-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF]/g;
@@ -71,8 +72,13 @@ const CONTEXT_WINDOWS: Record<string, number> = {
 };
 
 export function getContextWindow(model: string): number {
-  for (const [prefix, window] of Object.entries(CONTEXT_WINDOWS)) {
-    if (model.includes(prefix)) return window;
+  // Sort by prefix length (longest first) so more specific prefixes match before shorter ones
+  const sortedEntries = Object.entries(CONTEXT_WINDOWS)
+    .filter(([key]) => key !== 'default')
+    .sort((a, b) => b[0].length - a[0].length);
+
+  for (const [prefix, window] of sortedEntries) {
+    if (model.startsWith(prefix)) return window;
   }
   return CONTEXT_WINDOWS.default;
 }

@@ -64,10 +64,14 @@ ${sourceContext}`;
   const slug = slugMatch[1].trim().toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 80);
   const title = sanitizeUnicode(titleMatch[1].trim());
 
-  // Extract content (everything after SUMMARY line)
+  // Extract content (everything after the blank line following SUMMARY)
   const summaryIdx = articleContent.indexOf('SUMMARY:');
   if (summaryIdx === -1) return { saved: false }; // malformed output
-  const contentStart = articleContent.indexOf('\n', summaryIdx);
+  const lineEnd = articleContent.indexOf('\n', summaryIdx);
+  if (lineEnd === -1) return { saved: false }; // no content after SUMMARY
+  // Find the first blank line after SUMMARY to skip the summary text itself
+  const blankLineIdx = articleContent.indexOf('\n\n', summaryIdx);
+  const contentStart = blankLineIdx !== -1 ? blankLineIdx : lineEnd;
   const content = contentStart > -1 ? articleContent.slice(contentStart).trim() : '';
   if (!content || content.length < 50) return { saved: false }; // Too short = not valuable
 
@@ -78,7 +82,7 @@ ${sourceContext}`;
   const frontmatter = [
     '---',
     `title: ${JSON.stringify(title)}`,
-    `tags: [insight, derived]`,
+    `tags: ["insight", "derived"]`,
     `sources: [${sourcesUsed.map(s => JSON.stringify(s)).join(', ')}]`,
     `derived: true`,
     `created: ${JSON.stringify(new Date().toISOString())}`,

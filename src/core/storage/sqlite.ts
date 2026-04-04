@@ -10,6 +10,7 @@ export class SQLiteStorage {
     const dbPath = join(dataDir, '.browzy', 'browzy.db');
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
+    this.db.pragma('busy_timeout = 5000');
     this.init(dbPath);
   }
 
@@ -88,20 +89,23 @@ export class SQLiteStorage {
   }): void {
     const tagsStr = article.tags.join(', ');
 
-    this.db.prepare(`
-      INSERT OR REPLACE INTO articles (slug, title, summary, tags, content, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      article.slug, article.title, article.summary, tagsStr,
-      article.content, article.createdAt, article.updatedAt
-    );
+    // Article upsert + FTS index update in a single atomic transaction
+    const upsertArticle = this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT OR REPLACE INTO articles (slug, title, summary, tags, content, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        article.slug, article.title, article.summary, tagsStr,
+        article.content, article.createdAt, article.updatedAt
+      );
 
-    // Update FTS index
-    this.db.prepare('DELETE FROM articles_fts WHERE slug = ?').run(article.slug);
-    this.db.prepare(`
-      INSERT INTO articles_fts (slug, title, summary, content, tags)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(article.slug, article.title, article.summary, article.content, tagsStr);
+      this.db.prepare('DELETE FROM articles_fts WHERE slug = ?').run(article.slug);
+      this.db.prepare(`
+        INSERT INTO articles_fts (slug, title, summary, content, tags)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(article.slug, article.title, article.summary, article.content, tagsStr);
+    });
+    upsertArticle();
   }
 
   removeArticle(slug: string): void {
@@ -113,7 +117,7 @@ export class SQLiteStorage {
     limit = Math.min(Math.max(limit, 1), 1000);
     // Sanitize query for FTS5: strip special chars, quote each term
     const sanitized = query
-      .replace(/[^\w\s]/g, ' ')
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
       .trim()
       .split(/\s+/)
       .filter(t => t.length > 0)

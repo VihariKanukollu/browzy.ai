@@ -54,7 +54,9 @@ function sanitizeError(err: any, provider: string): Error {
 
 function getRetryDelay(attempt: number, retryAfterHeader?: string | null): number {
   if (retryAfterHeader) {
-    const seconds = parseInt(retryAfterHeader, 10);
+    // Handle both string values and Headers API .get() results
+    const headerValue = typeof retryAfterHeader === 'string' ? retryAfterHeader : String(retryAfterHeader);
+    const seconds = parseInt(headerValue, 10);
     if (!isNaN(seconds) && seconds > 0) return seconds * 1000;
   }
   // Exponential backoff with jitter: 1s, 2s, 4s (capped)
@@ -72,6 +74,19 @@ export function createProvider(config: LLMConfig): LLMProvider {
       return new OpenRouterProvider(config);
     default:
       throw new Error(`Unknown LLM provider: ${config.provider}`);
+  }
+}
+
+/**
+ * Try to create an LLM provider, returning null if no API key is configured.
+ * Used for zero-config first run where LLM is optional.
+ */
+export function tryCreateProvider(config: LLMConfig): LLMProvider | null {
+  if (!config.apiKey) return null;
+  try {
+    return createProvider(config);
+  } catch {
+    return null;
   }
 }
 
@@ -119,7 +134,8 @@ class ClaudeProvider implements LLMProvider {
         };
       } catch (err: any) {
         if (err.status === 429 && attempt < MAX_RETRIES) {
-          const delay = getRetryDelay(attempt, err.headers?.get?.('retry-after'));
+          const retryAfter = err.headers?.get?.('retry-after') ?? err.headers?.['retry-after'];
+          const delay = getRetryDelay(attempt, retryAfter);
           await new Promise(r => setTimeout(r, delay));
           continue;
         }
@@ -133,7 +149,8 @@ class ClaudeProvider implements LLMProvider {
     const { default: Anthropic } = await import('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: this.config.apiKey });
 
-    const systemMsg = options?.system ?? messages.find(m => m.role === 'system')?.content;
+    const systemContent = messages.find(m => m.role === 'system')?.content;
+    const systemMsg = options?.system ?? (typeof systemContent === 'string' ? systemContent : undefined);
     const nonSystemMessages = messages
       .filter(m => m.role !== 'system')
       .map(m => ({
@@ -197,7 +214,8 @@ class OpenAIProvider implements LLMProvider {
         };
       } catch (err: any) {
         if (err.status === 429 && attempt < MAX_RETRIES) {
-          const delay = getRetryDelay(attempt, err.headers?.get?.('retry-after'));
+          const retryAfter = err.headers?.get?.('retry-after') ?? err.headers?.['retry-after'];
+          const delay = getRetryDelay(attempt, retryAfter);
           await new Promise(r => setTimeout(r, delay));
           continue;
         }
@@ -288,7 +306,8 @@ class OpenRouterProvider implements LLMProvider {
         };
       } catch (err: any) {
         if (err.status === 429 && attempt < MAX_RETRIES) {
-          const delay = getRetryDelay(attempt, err.headers?.get?.('retry-after'));
+          const retryAfter = err.headers?.get?.('retry-after') ?? err.headers?.['retry-after'];
+          const delay = getRetryDelay(attempt, retryAfter);
           await new Promise(r => setTimeout(r, delay));
           continue;
         }

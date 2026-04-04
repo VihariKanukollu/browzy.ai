@@ -59,6 +59,8 @@ export function runMigrations(db: Database.Database, dbPath: string): void {
     }
   }
 
+  if (migrations.length === 0) return;
+
   const maxVersion = migrations[migrations.length - 1].version;
   if (currentVersion >= maxVersion) return;
 
@@ -82,7 +84,9 @@ export function runMigrations(db: Database.Database, dbPath: string): void {
         )
         .get();
       if (exists) {
-        db.prepare('UPDATE schema_version SET version = ?').run(
+        // Clear and re-insert to avoid stale rows (schema_version uses version as PK)
+        db.prepare('DELETE FROM schema_version').run();
+        db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(
           migration.version,
         );
       }

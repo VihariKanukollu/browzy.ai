@@ -13,7 +13,16 @@ interface CacheEntry<T> {
   generation: number;
 }
 
-class QueryCache<T = any> {
+interface QueryResult {
+  answer: string;
+  sourcesUsed: string[];
+  outputPath?: string;
+  confidence: 'high' | 'medium' | 'low';
+  gaps: string[];
+  tokensBudget?: { used: number; total: number };
+}
+
+class QueryCache<T = QueryResult> {
   private cache = new Map<string, CacheEntry<T>>();
   private readonly maxEntries: number;
   private readonly ttlMs: number;
@@ -84,5 +93,5 @@ class QueryCache<T = any> {
   }
 }
 
-// Singleton instance
-export const queryCache = new QueryCache();
+// Singleton instance — typed to QueryResult to avoid `any`
+export const queryCache = new QueryCache<QueryResult>();

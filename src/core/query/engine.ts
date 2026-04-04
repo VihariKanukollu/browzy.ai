@@ -14,6 +14,16 @@ export interface QueryResult {
   tokensBudget?: { used: number; total: number };
 }
 
+/** Prepared query — context built, prompt ready, no LLM call yet. */
+export interface PreparedQuery {
+  prompt: string;
+  systemPrompt: string;
+  sourcesUsed: string[];
+  confidence: 'high' | 'medium' | 'low';
+  gaps: string[];
+  tokensBudget: { used: number; total: number };
+}
+
 export type OutputFormat = 'markdown' | 'marp' | 'json';
 
 export class QueryEngine {
@@ -120,6 +130,61 @@ ${formatInstruction}`;
     }
 
     return result;
+  }
+
+  /**
+   * Build context and prompt without calling the LLM.
+   * Use this when you want to stream the response yourself.
+   */
+  prepare(
+    question: string,
+    options?: {
+      format?: OutputFormat;
+      model?: string;
+      followUp?: boolean;
+      conversationHistory?: Array<{ role: string; content: string }>;
+    }
+  ): PreparedQuery {
+    const format = options?.format ?? 'markdown';
+    const model = options?.model ?? 'claude-sonnet-4-20250514';
+
+    const budget = calculateBudget(
+      model,
+      SYSTEM_PROMPT,
+      options?.conversationHistory ?? [],
+    );
+
+    const contextBuilder = new ContextBuilder(this.dataDir);
+    const builtContext = contextBuilder.build(question, {
+      articleBudget: budget.articleBudget,
+      excludeSlugs: options?.followUp ? this.usedSlugs : undefined,
+    });
+
+    for (const scored of builtContext.articlesUsed) {
+      this.usedSlugs.add(scored.article.slug);
+    }
+
+    const formatInstruction = this.getFormatInstruction(format);
+    const confidenceNote = builtContext.confidence === 'low'
+      ? '\n\nNote: Your browzy has limited coverage on this topic. Flag what you know vs what you\'re inferring from general knowledge.'
+      : '';
+    const gapNote = builtContext.gaps.length > 0
+      ? `\n\nCoverage gaps detected for: ${builtContext.gaps.join(', ')}. Suggest sources the user could add.`
+      : '';
+
+    const prompt = `${builtContext.context}${confidenceNote}${gapNote}\n\nQUESTION: ${question}\n\n${formatInstruction}`;
+
+    return {
+      prompt,
+      systemPrompt: SYSTEM_PROMPT,
+      sourcesUsed: builtContext.articlesUsed.map(a => a.article.slug),
+      confidence: builtContext.confidence,
+      gaps: builtContext.gaps,
+      tokensBudget: {
+        used: builtContext.tokenCount,
+        total: budget.contextWindow,
+      },
+    };
   }
 
   /**

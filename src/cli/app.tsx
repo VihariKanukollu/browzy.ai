@@ -1,10 +1,10 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Box, Text, Static, useInput, useApp, useStdout } from 'ink';
 import TextInput from 'ink-text-input';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 import { writeFileSync as wfs, readFileSync as rfs, unlinkSync } from 'fs';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { getTheme } from './theme.js';
 import { Banner } from './components/Banner.js';
 import { touchProfile, getWelcomeMessage } from './onboarding.js';
@@ -19,10 +19,11 @@ import { useSession, loadSessionMeta, updateSessionMetaDigest } from './hooks/us
 import {
   updateStreak, recordSourceAdded, recordQuery, checkMilestones, loadStreak,
   getThinkingMessage, getIngestingMessage, getCompilingMessage, getHealthMessage,
-  getAddReward, getQueryReward, getExitMessage, getHealthReward,
+  getAddReward, getQueryReward, getExitMessage, getHealthReward, computeReflection,
 } from './personality.js';
 import { getKey, saveKey, looksLikeApiKey } from './keystore.js';
-import { loadConfig, ensureDataDirs, createProvider } from '../core/index.js';
+import { loadConfig, ensureDataDirs, createProvider, tryCreateProvider } from '../core/index.js';
+import { seedDemoKB } from '../core/demo/seed.js';
 import { ingest } from '../core/ingest/index.js';
 import { WikiCompiler } from '../core/compile/index.js';
 import { QueryEngine } from '../core/query/index.js';
@@ -30,6 +31,9 @@ import { WikiLinter } from '../core/lint/index.js';
 import { Wiki } from '../core/wiki/index.js';
 import { compactConversation } from '../core/retrieval/index.js';
 import { resolveGap } from '../core/discovery/index.js';
+import { initClipboard, checkClipboardChange } from '../core/discovery/clipboard.js';
+import { checkStaleSources } from '../core/discovery/freshness.js';
+import { FilesystemStorage } from '../core/storage/filesystem.js';
 import { QUERY_SYSTEM_PROMPT, CONVERSATION_CONTEXT_PROMPT, SESSION_DIGEST_PROMPT } from '../core/prompts.js';
 import { generateSessionDigest } from '../core/query/digest.js';
 import { crystallize } from '../core/query/crystallizer.js';
@@ -67,6 +71,17 @@ export class BrowzyErrorBoundary extends React.Component<
   }
 }
 
+// ── Helpers ───────────────────────────────────────────────────
+
+function extractTopic(input: string): string {
+  return input
+    .replace(/\b(i'm |i am |i want to |can you |please |could you )/gi, '')
+    .replace(/\b(interested in|learn about|dive into|explore|research)\b/gi, '')
+    .trim()
+    .replace(/[?.!]+$/, '')
+    .trim();
+}
+
 // ── Main App ───────────────────────────────────────────────────
 //
 // Layout pattern from Claude Code:
@@ -92,8 +107,10 @@ export const BrowzyApp: React.FC = () => {
   const [lastModelList, setLastModelList] = useState<Array<{ id: string; display_name: string }>>([]);
   const [crystallizedThisSession, setCrystallizedThisSession] = useState(false);
   const [outputFormat, setOutputFormat] = useState<OutputFormat>('markdown');
+  const [sessionGaps, setSessionGaps] = useState<string[]>([]);
+  const [pendingDive, setPendingDive] = useState<{ topic: string; originalInput: string } | null>(null);
 
-  // Refs
+  // Refs for input/loading (no forward-reference issues)
   const inputRef = useRef(input);
   inputRef.current = input;
   const loadingRef = useRef(loading);
@@ -104,18 +121,35 @@ export const BrowzyApp: React.FC = () => {
   const autocomplete = useAutocomplete();
   const session = useSession();
 
-  // Config + LLM
+  // Config + LLM (nullable — no API key on first run)
   const [config, setConfig] = useState<BrowzyConfig>(() => {
     const c = loadConfig();
     ensureDataDirs(c);
     return c;
   });
-  const [llm, setLlm] = useState<LLMProvider>(() => createProvider(config.llm));
 
-  // Set initial model name
-  useEffect(() => { setCurrentModel(config.llm.model || 'default'); }, []);
+  // Seed demo KB on first run (before stats are loaded)
+  const [demoSeeded] = useState(() => {
+    try {
+      return seedDemoKB(config.dataDir);
+    } catch {
+      return false;
+    }
+  });
+
+  // LLM provider is null when no API key is configured (first run / demo mode)
+  const [llm, setLlm] = useState<LLMProvider | null>(() => tryCreateProvider(config.llm));
+
+  // Track whether we're waiting for an API key from the user
+  const [awaitingApiKey, setAwaitingApiKey] = useState(false);
+  // Store the pending query/command that triggered the API key prompt
+  const pendingActionRef = useRef<{ type: 'query' | 'add'; value: string } | null>(null);
+
+  // Set initial model name — #22: include config.llm.model in deps
+  useEffect(() => { setCurrentModel(config.llm.model || 'default'); }, [config.llm.model]);
 
   // Stats — loaded synchronously so the banner has correct values on first render
+  // #16/#26: Re-load stats AFTER seeding so banner shows post-seed values
   const [stats, setStats] = useState(() => {
     try {
       const wiki = new Wiki(config.dataDir);
@@ -126,6 +160,21 @@ export const BrowzyApp: React.FC = () => {
       return { sources: 0, articles: 0, concepts: 0 };
     }
   });
+
+  // Refs — break dependency chains for callbacks (#1, #11, #21)
+  const llmRef = useRef(llm);
+  llmRef.current = llm;
+  const statsRef = useRef(stats);
+  statsRef.current = stats;
+  const outputFormatRef = useRef(outputFormat);
+  outputFormatRef.current = outputFormat;
+  const crystallizedRef = useRef(crystallizedThisSession);
+  crystallizedRef.current = crystallizedThisSession;
+
+  // Snapshot stats at session start for exit reflection
+  const statsAtStartRef = useRef(stats);
+  const sessionGapsRef = useRef(sessionGaps);
+  sessionGapsRef.current = sessionGaps;
 
   // Session memory — load last session meta and compute growth delta
   const [sessionMemory] = useState(() => {
@@ -154,7 +203,7 @@ export const BrowzyApp: React.FC = () => {
 
   // Generate digest for last session if it doesn't have one yet
   useEffect(() => {
-    if (sessionMemory.meta && !sessionMemory.digest) {
+    if (sessionMemory.meta && !sessionMemory.digest && llm) {
       const lastSession = session.loadLastSession();
       if (lastSession && lastSession.id === sessionMemory.meta.sessionId) {
         const userMessages = lastSession.messages.filter(m => m.role === 'user');
@@ -191,10 +240,14 @@ export const BrowzyApp: React.FC = () => {
         }
       }
     }
-  }, []);
+    // #3: re-run when LLM becomes available (e.g. after API key paste)
+  }, [llm]);
 
   // Welcome & streak — computed once with stats available
   const [welcomeMsg] = useState(() => {
+    if (demoSeeded) {
+      return 'Welcome to browzy! I\'ve loaded some starter articles so you can explore right away. Try asking a question, use /search to browse, or paste a URL to add your own knowledge.';
+    }
     updateStreak();
     const profile = touchProfile();
     return profile ? getWelcomeMessage(profile, stats) : 'Your knowledge, compiled.';
@@ -208,7 +261,55 @@ export const BrowzyApp: React.FC = () => {
     } catch { /* ignore */ }
   }, [config.dataDir]);
 
-  useEffect(() => { refreshStats(); }, [refreshStats]);
+  // #24: removed redundant refreshStats effect — stats are already loaded synchronously in useState
+
+  // Clipboard watcher — opt-in only
+  useEffect(() => {
+    if (!config.clipboard?.enabled) return;
+    initClipboard();
+
+    // #12: filter sensitive data; #19: poll every 5s instead of 3s
+    const sensitivePatterns = [/sk-ant-[a-zA-Z0-9\-_]{20,}/, /sk-[a-zA-Z0-9\-_]{48,}/, /sk-or-[a-zA-Z0-9\-_]{20,}/, /AKIA[A-Z0-9]{16}/, /^.{6,30}$/];
+    const timer = setInterval(async () => {
+      const newContent = checkClipboardChange();
+      if (newContent && llmRef.current) {
+        // Skip content that looks like API keys or passwords
+        const lines = newContent.trim().split('\n');
+        const isSensitive = lines.length === 1 && sensitivePatterns.some(p => p.test(newContent.trim()));
+        if (isSensitive) return;
+        try {
+          await ingest(newContent, config.dataDir, { llm: llmRef.current, type: 'text' });
+          const preview = newContent.slice(0, 50).replace(/\n/g, ' ');
+          setTempStatus(`+ Captured: "${preview}..."`);
+          refreshStats();
+        } catch { /* silently fail */ }
+      }
+    }, 5000);
+
+    return () => clearInterval(timer);
+  }, [config.clipboard?.enabled, llm]);
+
+  // Living Wiki — check for stale sources on startup (fire-and-forget)
+  // #13: use ref-based stats to avoid stale closure, keep as mount-only
+  const staleCheckRanRef = useRef(false);
+  useEffect(() => {
+    if (staleCheckRanRef.current) return;
+    if (statsRef.current.sources === 0) return;
+    staleCheckRanRef.current = true;
+
+    const fsStorage = new FilesystemStorage(config.dataDir);
+    const manifest = fsStorage.getRawManifest();
+
+    checkStaleSources(manifest).then(stale => {
+      if (stale.length > 0) {
+        session.addMessage('system',
+          `${stale.length} source${stale.length > 1 ? 's have' : ' has'} been updated since you last checked:\n` +
+          stale.map(s => `  · "${s.title}" — ${s.reason}`).join('\n') +
+          `\nType /refresh to update your browzy.`
+        );
+      }
+    }).catch(() => {});
+  }, [config.dataDir, session]);
 
   // Elapsed timer
   useEffect(() => {
@@ -222,33 +323,85 @@ export const BrowzyApp: React.FC = () => {
   // React cleanup only runs if the framework has time to unmount.
   // Terminal close (SIGTERM/SIGHUP) and Ctrl+C (SIGINT) kill the process
   // before React cleans up, so we need process-level handlers too.
+  const reflectionShownRef = useRef(false);
+  const showReflection = useCallback(() => {
+    if (reflectionShownRef.current) return;
+    reflectionShownRef.current = true;
+    const reflection = computeReflection(
+      session.messages,
+      statsAtStartRef.current,
+      stats,
+      sessionGapsRef.current,
+    );
+    if (reflection) {
+      console.log('\n── Session Reflection ──────────────────────');
+      console.log(reflection);
+      console.log('────────────────────────────────────────────\n');
+    }
+  }, [session.messages, stats]);
+
   const savedRef = useRef(false);
   const saveOnce = useCallback(() => {
     if (savedRef.current) return;
     savedRef.current = true;
+    showReflection();
     session.saveSession();
     session.saveSessionMeta(stats);
-  }, [session, stats]);
+  }, [session, stats, showReflection]);
+
+  // #2: separate unmount-only effect for saving (no saveOnce in cleanup of signal effect)
+  // #7: use exit() from Ink instead of process.exit(0) to avoid leaving terminal in raw mode
+  const saveOnceRef = useRef(saveOnce);
+  saveOnceRef.current = saveOnce;
 
   useEffect(() => {
-    const handler = () => { saveOnce(); process.exit(0); };
+    const handler = () => { saveOnceRef.current(); exit(); };
     process.on('SIGINT', handler);
     process.on('SIGTERM', handler);
     process.on('SIGHUP', handler);
     return () => {
-      saveOnce();
       process.removeListener('SIGINT', handler);
       process.removeListener('SIGTERM', handler);
       process.removeListener('SIGHUP', handler);
     };
-  }, [saveOnce]);
+  }, []); // stable — reads from ref
+
+  // Unmount-only save
+  const unmountedRef = useRef(false);
+  useEffect(() => {
+    return () => {
+      if (!unmountedRef.current) {
+        unmountedRef.current = true;
+        saveOnceRef.current();
+      }
+    };
+  }, []);
 
   // ── Streaming with throttle ─────────────────────────────────
 
   const streamThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestSnapshotRef = useRef('');
 
+  // Helper: prompt for API key inline when LLM is needed
+  // #1: use llmRef to avoid stale closure
+  const requireLlm = useCallback((action: { type: 'query' | 'add'; value: string }): boolean => {
+    if (llmRef.current) return true;
+    pendingActionRef.current = action;
+    setAwaitingApiKey(true);
+    session.addMessage('system', [
+      'To ' + (action.type === 'query' ? 'answer questions' : 'add sources') + ', I need an API key.',
+      '',
+      'Paste your Anthropic API key (starts with sk-ant-...)',
+      'Or paste an OpenAI key (sk-...) or OpenRouter key (sk-or-...).',
+      '',
+      'Get a Claude key at: console.anthropic.com/settings/keys',
+    ].join('\n'));
+    return false;
+  }, [session]);
+
   const handleQuery = useCallback(async (question: string) => {
+    if (!requireLlm({ type: 'query', value: question })) return;
+    const currentLlm = llmRef.current!; // #1: read from ref, guaranteed non-null after requireLlm
     session.addMessage('user', question);
     recordQuery();
     setLoading(true);
@@ -257,51 +410,53 @@ export const BrowzyApp: React.FC = () => {
     latestSnapshotRef.current = '';
 
     try {
-      // Use real streaming from the LLM provider
+      // Build context + prompt (no LLM call yet)
+      const engine = new QueryEngine(config.dataDir, currentLlm);
+      const prepared = engine.prepare(question, { format: outputFormatRef.current }); // #11: use ref
 
-      // Gather wiki context
-      const wikiObj = new Wiki(config.dataDir);
-      const searchResults = wikiObj.search(question, 5);
-      wikiObj.close();
-
-      // Build context
-      const engine = new QueryEngine(config.dataDir, llm);
-      const fullResult = await engine.query(question, { format: outputFormat, save: false });
-
-      // Now stream via provider
+      // #6: Single LLM call — stream directly with the prepared context (no double call)
       let finalText = '';
-      if (llm.stream) {
-        try {
-          // Build conversation history for context continuity
-          const recentHistory = session.messages.slice(-6).map(m => ({
-            role: m.role === 'assistant' ? 'assistant' as const : 'user' as const,
-            content: m.content.slice(0, 500), // Truncate for context window
+      try {
+        // #17: filter to only user/assistant roles for LLM history
+        const recentHistory = session.messages.slice(-6)
+          .filter(m => m.role === 'user' || m.role === 'assistant')
+          .map(m => ({
+            role: m.role as 'user' | 'assistant',
+            content: m.content.slice(0, 500),
           }));
 
-          const systemPrompt = QUERY_SYSTEM_PROMPT + '\n\n' + CONVERSATION_CONTEXT_PROMPT;
+        const systemPrompt = prepared.systemPrompt + '\n\n' + CONVERSATION_CONTEXT_PROMPT;
 
-          for await (const chunk of llm.stream(
-            [...recentHistory, { role: 'user' as const, content: `Context from wiki:\n${fullResult.answer.slice(0, 2000)}\n\nQuestion: ${question}` }],
-            { system: systemPrompt, maxTokens: 8192 }
-          )) {
-            latestSnapshotRef.current = chunk.snapshot;
-            finalText = chunk.snapshot;
+        for await (const chunk of currentLlm.stream(
+          [...recentHistory, { role: 'user' as const, content: prepared.prompt }],
+          { system: systemPrompt, maxTokens: 8192 }
+        )) {
+          latestSnapshotRef.current = chunk.snapshot;
+          finalText = chunk.snapshot;
 
-            // Throttle to ~4fps
-            if (!streamThrottleRef.current) {
-              streamThrottleRef.current = setTimeout(() => {
-                setStreamingText(latestSnapshotRef.current);
-                streamThrottleRef.current = null;
-              }, 250);
-            }
+          if (!streamThrottleRef.current) {
+            streamThrottleRef.current = setTimeout(() => {
+              setStreamingText(latestSnapshotRef.current);
+              streamThrottleRef.current = null;
+            }, 250);
           }
-        } catch {
-          // Fallback to non-streaming result
-          finalText = fullResult.answer;
         }
-      } else {
-        finalText = fullResult.answer;
+      } catch {
+        // Fallback: non-streaming call
+        const response = await currentLlm.chat(
+          [{ role: 'user', content: prepared.prompt }],
+          { system: prepared.systemPrompt, maxTokens: 8192 }
+        );
+        finalText = response.content;
       }
+
+      // Build a result object for downstream consumers (crystallizer, gaps, etc.)
+      const fullResult = {
+        answer: finalText,
+        sourcesUsed: prepared.sourcesUsed,
+        confidence: prepared.confidence,
+        gaps: prepared.gaps,
+      };
 
       // Clear throttle
       if (streamThrottleRef.current) {
@@ -310,10 +465,11 @@ export const BrowzyApp: React.FC = () => {
       }
 
       setStreamingText('');
-      session.addMessage('assistant', finalText || fullResult.answer, fullResult.sourcesUsed);
+      session.addMessage('assistant', finalText, fullResult.sourcesUsed);
 
-      // Insight Crystallizer — fire and forget, max 1 per session
-      if (!crystallizedThisSession && fullResult.sourcesUsed.length >= 2) {
+      // #5: Insight Crystallizer — use ref to prevent race condition
+      if (!crystallizedRef.current && fullResult.sourcesUsed.length >= 2) {
+        crystallizedRef.current = true; // set synchronously before async call
         try {
           const wikiForCrystal = new Wiki(config.dataDir);
           const sourceContents = fullResult.sourcesUsed.slice(0, 5).map(slug => {
@@ -323,16 +479,30 @@ export const BrowzyApp: React.FC = () => {
           wikiForCrystal.close();
 
           if (sourceContents.length >= 2) {
-            crystallize(question, finalText || fullResult.answer, fullResult.sourcesUsed, sourceContents, config.dataDir, llm)
+            crystallize(question, finalText, fullResult.sourcesUsed, sourceContents, config.dataDir, currentLlm)
               .then(result => {
                 if (result.saved) {
                   setCrystallizedThisSession(true);
                   setTempStatus(prev => prev ? `${prev} · insight drafted` : 'insight drafted');
+                } else {
+                  crystallizedRef.current = false; // reset if not saved
                 }
               })
-              .catch(() => { /* silently fail */ });
+              .catch(() => {
+                // #14: catch SQLITE_BUSY or other write errors
+                crystallizedRef.current = false;
+              });
+          } else {
+            crystallizedRef.current = false; // reset if not enough sources
           }
-        } catch { /* silently fail */ }
+        } catch {
+          crystallizedRef.current = false;
+        }
+      }
+
+      // Accumulate gaps for session reflection
+      if (fullResult.gaps && fullResult.gaps.length > 0) {
+        setSessionGaps(prev => [...prev, ...fullResult.gaps]);
       }
 
       // Show confidence + gaps
@@ -354,27 +524,21 @@ export const BrowzyApp: React.FC = () => {
         }).catch(() => { /* silently ignore */ });
       }
 
-      // Check for milestones
-      const milestone = checkMilestones(stats);
+      // Check for milestones — #11: use ref for stats
+      const milestone = checkMilestones(statsRef.current);
       if (milestone) session.addMessage('system', milestone);
 
-      // Auto-compact if conversation is getting long (>20 messages)
-      if (session.messages.length > 20) {
+      // #10: Auto-compact for LLM context only — don't replace displayed messages
+      // Track compacted context separately, keeping displayed messages intact
+      if (session.messages.length > 20 && currentLlm) {
         try {
-          const compacted = await compactConversation(
+          await compactConversation(
             session.messages.map(m => ({ role: m.role, content: m.content })),
-            llm,
-            6, // Keep last 6 messages
+            currentLlm,
+            6,
           );
-          if (compacted.summary) {
-            // Replace messages with compacted version
-            session.setMessages(compacted.keptMessages.map(m => ({
-              id: Date.now().toString(36) + Math.random().toString(36).slice(2, 4),
-              role: m.role as 'user' | 'assistant' | 'system',
-              content: m.content,
-              timestamp: Date.now(),
-            })));
-          }
+          // Compaction result is used internally for LLM context in future queries.
+          // Displayed messages in <Static> are NOT replaced.
         } catch { /* compaction failed, continue with full history */ }
       }
     } catch (err: any) {
@@ -384,7 +548,7 @@ export const BrowzyApp: React.FC = () => {
 
     setLoading(false);
     refreshStats();
-  }, [llm, config, session, refreshStats, stats, outputFormat]);
+  }, [config, session, refreshStats, requireLlm]);
 
   // ── Commands ────────────────────────────────────────────────
 
@@ -396,6 +560,7 @@ export const BrowzyApp: React.FC = () => {
     switch (cmd) {
       case '/add': {
         if (!args) { session.addMessage('system', 'Drop a URL or file path after /add. Drag files into the terminal to paste their paths.'); return; }
+        if (!requireLlm({ type: 'add', value: args })) return;
         const sources = parseMultipleSources(args);
         setLoading(true);
         const addedTitles: string[] = [];
@@ -403,7 +568,7 @@ export const BrowzyApp: React.FC = () => {
         for (let i = 0; i < sources.length; i++) {
           setLoadingLabel(getIngestingMessage());
           try {
-            const result = await ingest(sources[i], config.dataDir, { llm });
+            const result = await ingest(sources[i], config.dataDir, { llm: llmRef.current! });
             addedTitles.push(result.title);
             recordSourceAdded();
             session.addMessage('system', `✓ ${result.title}`);
@@ -415,7 +580,7 @@ export const BrowzyApp: React.FC = () => {
         setLoadingLabel(getCompilingMessage());
         let created = 0, updated = 0;
         try {
-          const compiler = new WikiCompiler(config.dataDir, llm);
+          const compiler = new WikiCompiler(config.dataDir, llmRef.current!);
           const result = await compiler.compile({ batchSize: config.compile.batchSize, extractConcepts: config.compile.extractConcepts });
           created = result.articlesCreated.length;
           updated = result.articlesUpdated.length;
@@ -440,9 +605,11 @@ export const BrowzyApp: React.FC = () => {
         break;
       }
       case '/health': {
+        // #4: guard against null LLM
+        if (!requireLlm({ type: 'query', value: '/health' })) return;
         setLoading(true); setLoadingLabel(getHealthMessage()); refreshStats();
         try {
-          const linter = new WikiLinter(config.dataDir, llm);
+          const linter = new WikiLinter(config.dataDir, llmRef.current!);
           const issues = await linter.lint();
           const e = issues.filter((i: LintIssue) => i.severity === 'error').length;
           const w = issues.filter((i: LintIssue) => i.severity === 'warning').length;
@@ -457,9 +624,10 @@ export const BrowzyApp: React.FC = () => {
         setLoading(false); break;
       }
       case '/rebuild': {
+        if (!requireLlm({ type: 'add', value: '' })) return;
         setLoading(true); setLoadingLabel(getCompilingMessage());
         try {
-          const compiler = new WikiCompiler(config.dataDir, llm);
+          const compiler = new WikiCompiler(config.dataDir, llmRef.current!);
           const r = await compiler.compile({ batchSize: config.compile.batchSize, extractConcepts: config.compile.extractConcepts });
           const total = r.articlesCreated.length + r.articlesUpdated.length;
           session.addMessage('system', total === 0
@@ -619,9 +787,15 @@ export const BrowzyApp: React.FC = () => {
         break;
       }
       case '/export': {
-        const safe = (args || `session-${session.sessionId}.md`).replace(/\.\./g, '').replace(/^\//, '').replace(/[^\w\-./]/g, '_');
-        const path = session.exportSession(join(config.dataDir, 'output', safe));
-        session.addMessage('system', `Saved to ${path}. Your research, preserved.`); break;
+        // #18: prevent path traversal — resolve and verify within output dir
+        const outputDir = join(config.dataDir, 'output');
+        const safe = (args || `session-${session.sessionId}.md`).replace(/[^\w\-./]/g, '_');
+        const resolvedPath = resolve(outputDir, safe);
+        if (!resolvedPath.startsWith(resolve(outputDir))) {
+          session.addMessage('system', 'Invalid export path.'); break;
+        }
+        const exportedPath = session.exportSession(resolvedPath);
+        session.addMessage('system', `Saved to ${exportedPath}. Your research, preserved.`); break;
       }
       case '/search': {
         if (!args) { session.addMessage('system', 'Usage: /search <term>'); break; }
@@ -682,6 +856,38 @@ export const BrowzyApp: React.FC = () => {
         }
         break;
       }
+      case '/refresh': {
+        if (!requireLlm({ type: 'add', value: '' })) return;
+        setLoading(true);
+        setLoadingLabel('Refreshing sources...');
+        try {
+          const fsStorage = new FilesystemStorage(config.dataDir);
+          const manifest = fsStorage.getRawManifest();
+          const stale = await checkStaleSources(manifest);
+
+          if (stale.length === 0) {
+            session.addMessage('system', 'Everything is up to date.');
+          } else {
+            for (const source of stale) {
+              try {
+                await ingest(source.origin, config.dataDir, { llm: llmRef.current! });
+                session.addMessage('system', `✓ Refreshed: ${source.title}`);
+              } catch (err: any) {
+                session.addMessage('system', `✗ ${source.title}: ${err.message}`);
+              }
+            }
+            // Recompile
+            setLoadingLabel('Recompiling...');
+            const compiler = new WikiCompiler(config.dataDir, llmRef.current!);
+            await compiler.compile({ batchSize: config.compile.batchSize });
+          }
+        } catch (err: any) {
+          session.addMessage('system', `Refresh error: ${err.message}`);
+        }
+        setLoading(false);
+        refreshStats();
+        break;
+      }
       case '/help':
         session.addMessage('system', [
           'Just type a question — your browzy will find the answer.',
@@ -692,6 +898,7 @@ export const BrowzyApp: React.FC = () => {
           '/copy                 Copy last answer to clipboard',
           '/health               How is your browzy doing?',
           '/model <provider>     Switch LLM model',
+          '/refresh              Re-fetch stale web sources',
           '/export               Save session to file',
           '/rebuild              Force recompilation',
           '/clear                Clear conversation',
@@ -701,26 +908,144 @@ export const BrowzyApp: React.FC = () => {
         ].join('\n'));
         break;
       case '/quit': case '/exit': case '/q':
-        session.saveSession();
+        // #15: add exit message BEFORE saving; #9: use saveOnce for full save (session + meta)
         session.addMessage('system', getExitMessage(loadStreak()));
+        saveOnce();
         setTimeout(() => exit(), 300); // Brief pause so they see the exit message
+        break;
+      // #20: handle /clear command
+      case '/clear':
+        session.setMessages([]);
+        setTempStatus('Conversation cleared.');
         break;
       default: session.addMessage('system', `Hmm, I don't know "${cmd}". Type /help to see what I can do.`);
     }
-  }, [llm, config, session, refreshStats, handleQuery, exit, outputFormat]);
+  }, [config, session, refreshStats, handleQuery, exit, requireLlm, saveOnce]);
 
   const handleSubmit = useCallback(async (value: string) => {
     const trimmed = value.trim();
+
+    // #8: check pendingDive BEFORE empty-input return so Enter confirms dive
+    if (pendingDive) {
+      setInput('');
+      autocomplete.setVisible(false);
+      const answer = trimmed.toLowerCase();
+      if (answer === 'n' || answer === 'no') {
+        const orig = pendingDive.originalInput;
+        setPendingDive(null);
+        handleQuery(orig);
+        return;
+      }
+      if (answer === 'y' || answer === 'yes' || answer === '') {
+        if (!requireLlm({ type: 'add', value: '' })) return;
+        const topic = pendingDive.topic;
+        setPendingDive(null);
+        setLoading(true);
+        setLoadingLabel(`Searching for sources on "${topic}"...`);
+
+        try {
+          const { searchWeb } = await import('../core/discovery/webSearch.js');
+          const queries = [
+            `${topic} overview`,
+            `${topic} explained`,
+            `${topic} fundamentals`,
+          ];
+
+          const urls: Array<{ url: string; title: string }> = [];
+          for (const q of queries) {
+            if (urls.length >= 3) break;
+            const result = await searchWeb(q);
+            if (result && !urls.some(u => u.url === result.url)) {
+              urls.push({ url: result.url, title: result.title });
+            }
+          }
+
+          if (urls.length === 0) {
+            session.addMessage('system', `Couldn't find good sources for "${topic}". Try pasting a specific URL.`);
+            setLoading(false);
+            return;
+          }
+
+          // Show what we found
+          session.addMessage('system',
+            `Found ${urls.length} sources:\n` +
+            urls.map((u, i) => `  ${i + 1}. ${u.title} (${new URL(u.url).hostname})`).join('\n')
+          );
+
+          // Ingest each
+          setLoadingLabel('Ingesting sources...');
+          for (const u of urls) {
+            try {
+              const result = await ingest(u.url, config.dataDir, { llm: llmRef.current! });
+              session.addMessage('system', `Done: ${result.title}`);
+            } catch (err: any) {
+              session.addMessage('system', `Failed: ${u.title}: ${err.message}`);
+            }
+          }
+
+          // Compile
+          setLoadingLabel('Compiling knowledge...');
+          const compiler = new WikiCompiler(config.dataDir, llmRef.current!);
+          await compiler.compile({ batchSize: config.compile.batchSize });
+
+          setLoading(false);
+          refreshStats();
+
+          session.addMessage('system', `Your browzy is now loaded on "${topic}". Ask me anything.`);
+
+        } catch (err: any) {
+          session.addMessage('system', `Dive error: ${err.message}`);
+          setLoading(false);
+        }
+        return;
+      }
+      // User typed something else — cancel dive and process as normal input
+      setPendingDive(null);
+      // Fall through to normal input handling below
+    }
+
     if (!trimmed) return;
 
     setInput('');
     autocomplete.setVisible(false);
 
-    // Detect pasted API keys — save them, don't send to LLM
+    // Detect pasted API keys — save them and create LLM provider
     const keyDetect = looksLikeApiKey(trimmed);
     if (keyDetect) {
       saveKey(keyDetect.provider, keyDetect.key);
       const names = { anthropic: 'Claude', openai: 'OpenAI', openrouter: 'OpenRouter' };
+
+      // Create LLM provider with the new key
+      const providerMap = { anthropic: 'claude' as const, openai: 'openai' as const, openrouter: 'openrouter' as const };
+      const newLlmConfig = { ...config.llm, provider: providerMap[keyDetect.provider], apiKey: keyDetect.key };
+      let newProvider: LLMProvider | null = null;
+      try {
+        newProvider = createProvider(newLlmConfig);
+        setLlm(newProvider);
+        llmRef.current = newProvider; // #1: update ref synchronously so replay reads correct value
+        setConfig(prev => ({ ...prev, llm: newLlmConfig }));
+        setCurrentModel(newLlmConfig.model || 'claude-sonnet-4-20250514');
+      } catch { /* provider creation failed — key might be invalid, saved anyway */ }
+
+      // If we were awaiting an API key, replay the pending action
+      if (awaitingApiKey && pendingActionRef.current && newProvider) {
+        setAwaitingApiKey(false);
+        const pending = pendingActionRef.current;
+        pendingActionRef.current = null;
+
+        session.addMessage('system', `${names[keyDetect.provider]} API key saved. Continuing...`);
+
+        // #1: replay immediately — llmRef is already updated, no stale closure
+        setTimeout(async () => {
+          if (pending.type === 'query') {
+            await handleQuery(pending.value);
+          } else if (pending.type === 'add') {
+            await handleCommand(`/add ${pending.value}`);
+          }
+        }, 50);
+        return;
+      }
+
       session.addMessage('system', [
         `${names[keyDetect.provider]} API key saved.`,
         '',
@@ -736,14 +1061,49 @@ export const BrowzyApp: React.FC = () => {
 
     history.addToHistory(trimmed);
 
+    // Intent: URL auto-detect — paste a URL, browzy ingests automatically
+    if (/^https?:\/\//i.test(trimmed) || /^www\./i.test(trimmed)) {
+      await handleCommand(`/add ${trimmed}`);
+      return;
+    }
+
+    // Intent: File path auto-detect
+    if (/^(\/|~\/|\.\/|\.\.\/)/.test(trimmed) && /\.(pdf|md|txt|png|jpg|jpeg|gif|webp)$/i.test(trimmed)) {
+      await handleCommand(`/add ${trimmed}`);
+      return;
+    }
+
+    // Intent: Topic exploration — auto-dive with confirmation
+    const isTopicExplore = /\b(interested in|learn about|dive into|explore|research)\b/i.test(trimmed);
+    if (isTopicExplore) {
+      const topic = extractTopic(trimmed);
+      if (topic.length > 2) {
+        const wiki = new Wiki(config.dataDir);
+        const coverage = wiki.search(topic, 3);
+        wiki.close();
+
+        if (coverage.length < 2) {
+          session.addMessage('system',
+            `Your browzy doesn't have much on "${topic}". Want me to find sources? (y/Enter = yes, n = skip)`
+          );
+          setPendingDive({ topic, originalInput: trimmed });
+          return;
+        }
+      }
+      // Good coverage or short topic — treat as Q&A
+      handleQuery(trimmed);
+      return;
+    }
+
     let normalized = trimmed.replace(/^browzy\s+/i, '');
-    const cmds = ['add', 'search', 'format', 'copy', 'health', 'rebuild', 'model', 'export', 'help', 'quit', 'exit', 'q', 'clear'];
+    const cmds = ['add', 'search', 'format', 'copy', 'health', 'rebuild', 'refresh', 'model', 'export', 'help', 'quit', 'exit', 'q', 'clear'];
     const first = normalized.split(/\s+/)[0].toLowerCase().replace(/^\//, '');
     if (cmds.includes(first)) normalized = '/' + (normalized.startsWith('/') ? normalized.slice(1) : normalized);
 
     if (normalized.startsWith('/')) await handleCommand(normalized);
     else await handleQuery(normalized);
-  }, [autocomplete, history, handleCommand, handleQuery]);
+  // #21: use refs for frequently-changing values to break dependency cascade
+  }, [autocomplete, history, handleCommand, handleQuery, awaitingApiKey, config, session, pendingDive, requireLlm, refreshStats]);
 
   // ── Keyboard ────────────────────────────────────────────────
 
@@ -752,10 +1112,10 @@ export const BrowzyApp: React.FC = () => {
 
     if (key.ctrl && ch === 'c') {
       if (inputRef.current) setInput('');
-      else { session.saveSession(); setTimeout(() => exit(), 50); }
+      else { saveOnceRef.current(); setTimeout(() => exit(), 50); } // #9: use saveOnce (includes meta)
       return;
     }
-    if (key.ctrl && ch === 'd') { session.saveSession(); setTimeout(() => exit(), 50); return; }
+    if (key.ctrl && ch === 'd') { saveOnceRef.current(); setTimeout(() => exit(), 50); return; } // #9: use saveOnce
     if (key.ctrl && ch === 'e') { handleOpenEditor(); return; }
     if (key.ctrl && ch === 's') {
       if (inputRef.current.trim()) { setStashedInput(inputRef.current); setInput(''); setTempStatus('Stashed'); }
@@ -781,12 +1141,14 @@ export const BrowzyApp: React.FC = () => {
     const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
     const tmp = join(tmpdir(), `browzy-edit-${Date.now()}.txt`);
     wfs(tmp, inputRef.current, 'utf-8');
-    try { execSync(`${editor} ${tmp}`, { stdio: 'inherit' }); const r = rfs(tmp, 'utf-8').trim(); if (r) setInput(r); }
+    // #25: use execFileSync to avoid shell injection from $EDITOR
+    try { execFileSync(editor, [tmp], { stdio: 'inherit' }); const r = rfs(tmp, 'utf-8').trim(); if (r) setInput(r); }
     catch { /* cancelled */ }
     try { unlinkSync(tmp); } catch { /* ignore */ }
   };
 
-  useEffect(() => { autocomplete.updateForInput(input); }, [input]);
+  // #23: add autocomplete to dependency array
+  useEffect(() => { autocomplete.updateForInput(input); }, [input, autocomplete]);
 
   // ── Render ──────────────────────────────────────────────────
   //
@@ -819,7 +1181,7 @@ export const BrowzyApp: React.FC = () => {
           if (item.type === 'banner') {
             return (
               <Box key="banner">
-                <Banner welcome={welcomeMsg} stats={stats} model={config.llm.model || 'default'} dataDir={config.dataDir} lastSessionDigest={sessionMemory.digest} growthDelta={sessionMemory.growthDelta} />
+                <Banner welcome={welcomeMsg} stats={stats} model={config.llm.model || 'default'} dataDir={config.dataDir} lastSessionDigest={sessionMemory.digest} growthDelta={sessionMemory.growthDelta} demoMode={demoSeeded && !llm} />
               </Box>
             );
           }

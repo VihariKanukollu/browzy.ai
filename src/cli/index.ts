@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 
+/**
+ * @deprecated This entry point is unused. The real CLI entry is src/cli/entry.tsx
+ * (see package.json "bin" field). Kept for backward compatibility only.
+ */
+
 import dotenv from 'dotenv';
 import { join } from 'path';
 import { homedir } from 'os';
 
-// Load .env from ~/.browzy/.env first (global), then cwd/.env (local override)
-dotenv.config({ path: join(homedir(), '.browzy', '.env') });
-dotenv.config(); // cwd/.env — won't overwrite already-set vars
+// Load .env: cwd/.env first (local), then ~/.browzy/.env (global fallback)
+dotenv.config(); // cwd/.env — local project config loaded first
+dotenv.config({ path: join(homedir(), '.browzy', '.env') }); // global fallback
 import { Command } from 'commander';
 import { initCommand } from './commands/init.js';
 import { ingestCommand } from './commands/ingest.js';

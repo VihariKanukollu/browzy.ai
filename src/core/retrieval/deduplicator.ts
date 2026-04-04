@@ -97,6 +97,8 @@ export function checkDuplicate(
         // Use stored contentHash when available; fall back to re-hashing
         if (s.contentHash) return s.contentHash === hash;
         if (!existsSync(s.origin)) return false;
+        // Slow path: no cached contentHash — re-reading file from disk
+        console.warn(`[dedup] No cached contentHash for "${s.title}" (${s.origin}), falling back to file read. Re-ingest to cache the hash.`);
         return hashFileContent(s.origin) === hash;
       });
 

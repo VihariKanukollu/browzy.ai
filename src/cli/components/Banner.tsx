@@ -22,9 +22,10 @@ interface BannerProps {
   dataDir: string;
   lastSessionDigest?: string;
   growthDelta?: { articles: number; sources: number };
+  demoMode?: boolean;
 }
 
-export const Banner: React.FC<BannerProps> = React.memo(({ welcome, stats, model, dataDir, lastSessionDigest, growthDelta }) => {
+export const Banner: React.FC<BannerProps> = React.memo(({ welcome, stats, model, dataDir, lastSessionDigest, growthDelta, demoMode }) => {
   const theme = getTheme();
   const streak = loadStreak();
 
@@ -71,10 +72,12 @@ export const Banner: React.FC<BannerProps> = React.memo(({ welcome, stats, model
           </>
         )}
       </Box>
-      <Box>
-        <Text color={theme.textMuted}>model    </Text>
-        <Text color={theme.text}>{model}</Text>
-      </Box>
+      {!demoMode && (
+        <Box>
+          <Text color={theme.textMuted}>model    </Text>
+          <Text color={theme.text}>{model}</Text>
+        </Box>
+      )}
 
       {lastSessionDigest && (
         <Box marginTop={1}>
@@ -92,7 +95,15 @@ export const Banner: React.FC<BannerProps> = React.memo(({ welcome, stats, model
       </Box>
 
       <Box flexDirection="column" marginTop={1} marginBottom={1}>
-        {stats.articles === 0 ? (
+        {demoMode ? (
+          <>
+            <Text color={theme.textMuted}>  Try these to explore:</Text>
+            <Text><Text color={theme.accent}>  /search browzy        </Text><Text color={theme.textMuted}>Search the starter articles</Text></Text>
+            <Text><Text color={theme.accent}>  /add {'<url>'}           </Text><Text color={theme.textMuted}>Add your own knowledge (needs API key)</Text></Text>
+            <Text><Text color={theme.accent}>  {'<question>'}           </Text><Text color={theme.textMuted}>Ask anything (needs API key)</Text></Text>
+            <Text><Text color={theme.accent}>  /help                </Text><Text color={theme.textMuted}>All commands</Text></Text>
+          </>
+        ) : stats.articles === 0 ? (
           <>
             <Text color={theme.accent}>  A blank canvas. Add your first source and watch the magic happen.</Text>
             <Text> </Text>

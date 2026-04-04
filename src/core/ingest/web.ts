@@ -1,6 +1,6 @@
 import TurndownService from 'turndown';
 import { createHash } from 'node:crypto';
-import { writeFileSync } from 'fs';
+import { writeFileSync, mkdirSync } from 'fs';
 import { join, extname as pathExtname } from 'path';
 import type { RawSource } from '../types.js';
 import { slugify, fetchWithTimeout } from '../utils.js';
@@ -90,13 +90,17 @@ function isPermittedRedirect(originalUrl: string, redirectUrl: string): boolean 
 async function fetchFollowingSafeRedirects(
   url: string,
   options: RequestInit = {},
-  depth = 0
+  depth = 0,
+  startTime = Date.now(),
 ): Promise<Response> {
   if (depth > MAX_REDIRECTS) {
     throw new Error(`Too many redirects (exceeded ${MAX_REDIRECTS})`);
   }
 
-  const response = await fetchWithTimeout(url, { ...options, timeoutMs: 30_000 });
+  // Track cumulative elapsed time across all redirect hops, not per-hop
+  const elapsed = Date.now() - startTime;
+  const remainingTimeout = Math.max(1000, 30_000 - elapsed);
+  const response = await fetchWithTimeout(url, { ...options, timeoutMs: remainingTimeout });
 
   if ([301, 302, 307, 308].includes(response.status)) {
     const location = response.headers.get('location');
@@ -106,7 +110,7 @@ async function fetchFollowingSafeRedirects(
     if (!isPermittedRedirect(url, redirectUrl)) {
       throw new Error(`Blocked redirect from ${new URL(url).hostname} to ${new URL(redirectUrl).hostname}`);
     }
-    return fetchFollowingSafeRedirects(redirectUrl, options, depth + 1);
+    return fetchFollowingSafeRedirects(redirectUrl, options, depth + 1, startTime);
   }
 
   return response;
@@ -143,9 +147,15 @@ function stripNonContent(html: string): string {
   cleaned = cleaned.replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
 
   // Remove common non-content elements by tag
+  // Apply repeatedly until no more matches to handle nested tags (e.g., <nav><nav>...</nav></nav>)
   const removeTags = ['nav', 'footer', 'aside', 'iframe', 'svg'];
   for (const tag of removeTags) {
-    cleaned = cleaned.replace(new RegExp(`<${tag}[\\s\\S]*?<\\/${tag}>`, 'gi'), '');
+    const re = new RegExp(`<${tag}[\\s\\S]*?<\\/${tag}>`, 'gi');
+    let prev: string;
+    do {
+      prev = cleaned;
+      cleaned = cleaned.replace(re, '');
+    } while (cleaned !== prev);
   }
 
   // Remove elements by common non-content class/id patterns
@@ -230,6 +240,7 @@ export async function ingestWeb(
   const title = sanitizeUnicode(titleMatch?.[1]?.trim() || url);
 
   // Download images (capped, with SSRF + size checks)
+  mkdirSync(join(dataDir, 'raw', 'images'), { recursive: true });
   const images: string[] = [];
   const imgRegex = /<img[^>]+src="([^"]+)"/g;
   let match;

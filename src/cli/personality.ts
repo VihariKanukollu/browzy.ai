@@ -235,6 +235,48 @@ export function getExitMessage(streak: StreakData): string {
   return EXIT_MESSAGES[Math.floor(Math.random() * EXIT_MESSAGES.length)];
 }
 
+// ── Session Reflection ─────────────────────────────────────────
+
+export function computeReflection(
+  messages: Array<{ role: string; content: string }>,
+  statsAtStart: { articles: number; sources: number },
+  statsNow: { articles: number; sources: number },
+  gaps: string[],
+): string {
+  const userMessages = messages.filter(m => m.role === 'user');
+  const questionCount = userMessages.filter(m => !m.content.startsWith('/')).length;
+
+  if (questionCount === 0) return ''; // no reflection for empty sessions
+
+  const articleDelta = statsNow.articles - statsAtStart.articles;
+  const sourceDelta = statsNow.sources - statsAtStart.sources;
+
+  const lines: string[] = [];
+
+  // Questions asked
+  if (questionCount === 1) {
+    lines.push('You explored 1 question this session.');
+  } else {
+    lines.push(`You asked ${questionCount} questions this session.`);
+  }
+
+  // Growth
+  if (articleDelta > 0 || sourceDelta > 0) {
+    const parts: string[] = [];
+    if (articleDelta > 0) parts.push(`${articleDelta} new article${articleDelta > 1 ? 's' : ''}`);
+    if (sourceDelta > 0) parts.push(`${sourceDelta} new source${sourceDelta > 1 ? 's' : ''}`);
+    lines.push(`Your browzy grew: +${parts.join(', ')}.`);
+  }
+
+  // Unresolved gaps
+  const uniqueGaps = [...new Set(gaps)].slice(0, 3);
+  if (uniqueGaps.length > 0) {
+    lines.push(`Unresolved: ${uniqueGaps.join(', ')} — consider adding sources.`);
+  }
+
+  return lines.join('\n');
+}
+
 // ── Empty State Messages ────────────────────────────────────────
 
 export function getEmptyStateMessage(): string {

@@ -1,5 +1,5 @@
 export { loadConfig, ensureDataDirs } from './config.js';
-export { createProvider } from './llm/index.js';
+export { createProvider, tryCreateProvider } from './llm/index.js';
 export { FilesystemStorage } from './storage/filesystem.js';
 export { SQLiteStorage } from './storage/sqlite.js';
 export { ingest, detectSourceType } from './ingest/index.js';

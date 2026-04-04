@@ -33,11 +33,13 @@ export async function ingest(
   dataDir: string,
   options?: { llm?: LLMProvider; type?: SourceType; skipDuplicateCheck?: boolean }
 ): Promise<RawSource> {
+  // Single FilesystemStorage instance — reused for dedup check and manifest update
+  const fsStore = new FilesystemStorage(dataDir);
+
   // Check for duplicates before ingesting
   let existingSource: RawSource | undefined;
   if (!options?.skipDuplicateCheck) {
     const { checkDuplicate } = await import('../retrieval/deduplicator.js');
-    const fsStore = new FilesystemStorage(dataDir);
     const manifest = fsStore.getRawManifest();
     const dupCheck = checkDuplicate(input, manifest);
     if (dupCheck.isDuplicate) {
@@ -82,9 +84,10 @@ export async function ingest(
     source.id = existingSource.id;
   }
 
-  // Update manifest
-  const fs = new FilesystemStorage(dataDir);
-  const manifest = fs.getRawManifest();
+  // Update manifest (reuses the fsStore created above — no duplicate instance)
+  // Note: re-ingest still does a full fetch (by design) — the upsert below
+  // ensures the manifest and index stay consistent with the latest content.
+  const manifest = fsStore.getRawManifest();
   // Replace if same origin exists, otherwise append
   const existing = manifest.findIndex(s => s.origin === source.origin);
   if (existing >= 0) {
@@ -92,7 +95,7 @@ export async function ingest(
   } else {
     manifest.push(source);
   }
-  fs.writeRawManifest(manifest);
+  fsStore.writeRawManifest(manifest);
 
   // Invalidate query cache — new data means old answers may be stale
   queryCache.invalidate();

@@ -161,7 +161,9 @@ export class ContextBuilder {
       // Build article context — use relevant sections if available
       let articleContent: string;
 
-      if (scored.matchedSections.length > 0 && scored.matchedSections.length < extractSections(article.content).length) {
+      // Only call extractSections if matchedSections don't already cover the article
+      const allSections = scored.matchedSections.length > 0 ? scored.matchedSections : extractSections(article.content);
+      if (scored.matchedSections.length > 0 && scored.matchedSections.length < allSections.length) {
         // Include only relevant sections (+ intro always)
         const sectionTexts = scored.matchedSections
           .slice(0, 5) // Max 5 sections per article
@@ -179,7 +181,7 @@ export class ContextBuilder {
         if (scored.matchedSections.length > 0) {
           articleSections = scored.matchedSections;
         } else {
-          articleSections = extractSections(article.content);
+          articleSections = allSections;
         }
 
         let selectedContent = '';
