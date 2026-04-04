@@ -406,11 +406,21 @@ export const BrowzyApp: React.FC = () => {
               const resp = await fetch('https://openrouter.ai/api/v1/models', {
                 headers: { 'Authorization': `Bearer ${key}` },
               });
-              const data = await resp.json() as { data: Array<{ id: string; name: string }> };
-              // Show top models, grouped nicely
-              const popular = ['anthropic/claude', 'openai/gpt-4', 'openai/o', 'google/gemini', 'meta-llama', 'mistralai', 'deepseek'];
+              const data = await resp.json() as { data: Array<{ id: string; name: string; pricing?: { prompt?: string } }> };
+              // Sort by popularity (cheapest per-token models tend to be most popular/used)
+              // Filter to major providers, sort by name for clean grouping
+              const majorProviders = ['anthropic', 'openai', 'google', 'meta-llama', 'mistralai', 'deepseek', 'cohere', 'qwen'];
               models = data.data
-                .filter((m: { id: string }) => popular.some(p => m.id.startsWith(p)))
+                .filter((m: { id: string }) => majorProviders.some(p => m.id.startsWith(p + '/')))
+                .filter((m: { id: string }) => !m.id.includes('free') && !m.id.includes('extended'))
+                .sort((a, b) => {
+                  // Sort by provider group, then by name
+                  const aProvider = a.id.split('/')[0];
+                  const bProvider = b.id.split('/')[0];
+                  const providerOrder = majorProviders.indexOf(aProvider) - majorProviders.indexOf(bProvider);
+                  if (providerOrder !== 0) return providerOrder;
+                  return a.name.localeCompare(b.name);
+                })
                 .slice(0, 30)
                 .map((m: { id: string; name: string }) => ({ id: m.id, display_name: m.name }));
             }
@@ -421,9 +431,15 @@ export const BrowzyApp: React.FC = () => {
               const { default: OpenAI } = await import('openai');
               const client = new OpenAI({ apiKey: key });
               const list = await client.models.list();
+              // Only chat models, exclude realtime/image/audio/embedding/legacy
+              const excludePatterns = ['realtime', 'image', 'audio', 'tts', 'whisper', 'dall-e', 'embedding', 'moderation', 'babbage', 'davinci', 'search', 'instruct', 'similarity', 'code-'];
               models = Array.from(list.data)
-                .filter((m: { id: string }) => m.id.startsWith('gpt-'))
-                .sort((a: { id: string }, b: { id: string }) => b.id.localeCompare(a.id))
+                .filter((m: { id: string }) =>
+                  (m.id.startsWith('gpt-') || m.id.startsWith('o1') || m.id.startsWith('o3') || m.id.startsWith('o4') || m.id.startsWith('chatgpt')) &&
+                  !excludePatterns.some(p => m.id.includes(p))
+                )
+                // Sort by created date (newest first)
+                .sort((a: { id: string; created: number }, b: { id: string; created: number }) => (b.created || 0) - (a.created || 0))
                 .slice(0, 15)
                 .map((m: { id: string }) => ({ id: m.id, display_name: m.id }));
             }

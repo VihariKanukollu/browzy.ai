@@ -1,0 +1,21 @@
+# Source files (npm only needs dist/)
+src/
+tsconfig.json
+
+# Local config & secrets
+.env
+browzy.config.json
+*.db
+*.db-wal
+*.db-shm
+
+# Source maps
+*.map
+
+# Dev files
+.git/
+.github/
+.claude/
+node_modules/
+src/core/__tests__/
+dist/core/__tests__/
