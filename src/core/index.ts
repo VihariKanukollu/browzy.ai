@@ -1,0 +1,10 @@
+export { loadConfig, ensureDataDirs } from './config.js';
+export { createProvider } from './llm/index.js';
+export { FilesystemStorage } from './storage/filesystem.js';
+export { SQLiteStorage } from './storage/sqlite.js';
+export { ingest, detectSourceType } from './ingest/index.js';
+export { WikiCompiler } from './compile/index.js';
+export { QueryEngine } from './query/index.js';
+export { WikiLinter } from './lint/index.js';
+export { Wiki } from './wiki/index.js';
+export type * from './types.js';

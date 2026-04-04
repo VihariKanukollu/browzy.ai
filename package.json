@@ -1,0 +1,46 @@
+{
+  "name": "browzy",
+  "version": "0.1.0",
+  "description": "LLM-powered personal knowledge base engine",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "browzy": "dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli/index.js",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "knowledge-base",
+    "llm",
+    "wiki",
+    "research"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "better-sqlite3": "^11.7.0",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "dotenv": "^17.4.0",
+    "glob": "^11.0.1",
+    "gray-matter": "^4.0.3",
+    "mime-types": "^2.1.35",
+    "openai": "^4.77.0",
+    "ora": "^8.1.1",
+    "pdf-parse": "^1.1.1",
+    "turndown": "^7.2.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^22.10.0",
+    "@types/turndown": "^5.0.5",
+    "typescript": "^5.7.0"
+  }
+}
