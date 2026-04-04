@@ -10,13 +10,14 @@
   <a href="#quickstart">Quickstart</a> &middot;
   <a href="#how-it-works">How it works</a> &middot;
   <a href="#commands">Commands</a> &middot;
+  <a href="#features">Features</a> &middot;
   <a href="#architecture">Architecture</a> &middot;
   <a href="#configuration">Configuration</a>
 </p>
 
 ---
 
-**browzy** is an LLM-powered personal knowledge base engine. Feed it articles, PDFs, images, and web links. It compiles everything into an interconnected wiki, then lets you ask questions, run health checks, and generate reports against your collected knowledge.
+**browzy** is an LLM-powered personal knowledge base that lives in your terminal. Feed it articles, PDFs, images, and web links. An AI compiles everything into an interconnected knowledge base, then you ask it questions and it answers from *your* collected knowledge.
 
 ```
 $ browzy
@@ -28,48 +29,47 @@ $ browzy
   ██████╔╝██║  ██║╚██████╔╝╚███╔███╔╝███████╗   ██║
   ╚═════╝ ╚═╝  ╚═╝ ╚═════╝  ╚══╝╚══╝ ╚══════╝   ╚═╝
 
-  Good morning, Vihari. What are we researching today?
+  Back at it. What are we chasing today, Vihari?
 
-  sources 12    articles 34    concepts 87
-  model   claude-sonnet-4-20250514
+  sources 12  ·  articles 34  ·  concepts 87  ·  3-day streak
 
 ────────────────────────────────────────────────────────
-› explain Helly's theorem and its applications
+› explain the connection between attention mechanisms and Helly's theorem
 ```
 
 ## Quickstart
 
 ```bash
-# Install globally
+# Install
 npm install -g browzy
 
-# First launch — guided setup (name, API key, model picker)
+# Launch — first run guides you through setup
 browzy
-
-# Or set your API key and init manually
-export ANTHROPIC_API_KEY=sk-ant-...
-browzy init
 ```
+
+**No API key needed to start.** browzy ships with demo articles so you can explore immediately. When you're ready to add your own knowledge, paste your Claude API key and go.
 
 **Add your first source:**
 
-```bash
-# From the interactive prompt
-/add https://arxiv.org/html/2604.01548v1
+```
+› /add https://arxiv.org/html/2604.01548v1
+```
 
-# Or from the command line
-browzy ingest https://en.wikipedia.org/wiki/Transformer_(deep_learning_model)
-browzy ingest ~/Downloads/paper.pdf
-browzy ingest ~/research/notes.md
-browzy compile
+Or just paste a URL — browzy detects it and ingests automatically:
+
+```
+› https://en.wikipedia.org/wiki/Transformer_(deep_learning_model)
+✓ Transformer (deep learning model)
+Weaving new knowledge in... 4.2s
+Your browzy just learned about Transformer (deep learning model). 2 new articles created.
 ```
 
 **Ask questions:**
 
 ```
 › What are the key components of the transformer architecture?
-› How does multi-head attention differ from self-attention?
-› /health
+› tell me more
+› how does this connect to my other articles?
 ```
 
 ## How it works
@@ -79,43 +79,34 @@ browzy compile
 ┌──────────────┐         ┌──────────────┐          ┌──────────────┐
 │  URLs        │         │  LLM reads   │          │  "Why did    │
 │  PDFs        │────────▶│  raw sources, │────────▶│  transformers│
-│  Images      │         │  writes wiki  │          │  replace     │
+│  Images      │         │  writes       │          │  replace     │
 │  Text files  │         │  articles     │          │  RNNs?"      │
 └──────────────┘         └──────────────┘          └──────────────┘
        │                        │                         │
        ▼                        ▼                         ▼
-   raw/*.md                wiki/*.md                 Terminal output
-   _manifest.json          _index.json               or saved .md/.marp
-   SQLite index            SQLite FTS                 filed back into wiki
+   raw/*.md                articles/*.md             Streamed answer
+   Web cache               FTS5 index               with citations
+   Dedup check             Backlinks                 + confidence
 ```
 
-**The loop that compounds:**
-
-1. **Ingest** raw sources (web, PDF, image, text) into `raw/`
-2. **Compile** sources into interconnected wiki articles with cross-references, citations, and concept extraction
-3. **Ask** questions — browzy searches the wiki via FTS, gathers relevant articles, and synthesizes an answer with the LLM
-4. **Save** answers back into the wiki, so your explorations always build on themselves
-5. **Lint** the wiki for contradictions, broken links, gaps, and quality issues
+**The loop that compounds:** every source you add makes every future answer better. Every question you ask can surface gaps — browzy suggests sources to fill them.
 
 ## Commands
 
-browzy has two interfaces: an **interactive REPL** (type `browzy`) and a **CLI** (type `browzy <command>`).
-
-### Interactive mode
-
-Type `browzy` to enter the interactive prompt. Just type a question to query your knowledge base, or use `/` commands:
-
-| Command | Description |
+| Command | What it does |
 |---------|-------------|
-| `/add <sources...>` | Add URLs, PDFs, images, or text files. Ingests + auto-compiles. |
-| `/ask <question>` | Explicitly query the knowledge base |
-| `/health` | Stats + wiki health checks (contradictions, gaps, orphans) |
-| `/rebuild` | Force recompile all sources into the wiki |
-| `/format <md\|marp\|json>` | Set output format for answers |
-| `/save` | Toggle auto-save for query outputs |
-| `/export [filename]` | Export current session as markdown |
-| `/help` | Show all commands |
-| `/quit` | Exit |
+| *just type* | Ask your browzy anything — this is the main action |
+| `/add <sources...>` | Add URLs, PDFs, images, text files (or just paste a URL) |
+| `/search <term>` | Full-text search across all articles |
+| `/model` | Browse and switch models (Claude, OpenAI, OpenRouter) |
+| `/health` | Stats + health checks (contradictions, gaps, orphans) |
+| `/rebuild` | Force recompile all sources |
+| `/format <md\|marp\|json>` | Change output format |
+| `/copy` | Copy last answer to clipboard |
+| `/export [file]` | Save session as markdown |
+| `/clear` | Clear conversation |
+| `/help` | All commands |
+| `/quit` | Exit (session saved automatically) |
 
 **Keyboard shortcuts:**
 
@@ -124,138 +115,156 @@ Type `browzy` to enter the interactive prompt. Just type a question to query you
 | `Tab` | Autocomplete commands |
 | `↑` `↓` | Browse command history |
 | `→` | Accept ghost text suggestion |
-| `Ctrl+E` | Open current input in `$EDITOR` |
+| `Ctrl+E` | Open input in `$EDITOR` |
 | `Ctrl+S` | Stash/restore input draft |
 | `Ctrl+C` | Clear input or exit |
-| `Ctrl+D` | Exit |
 
-### CLI mode
+## Features
 
-For scripting and pipelines:
+### Smart ingestion
+- **Auto-detect intent** — paste a URL, browzy ingests it. Paste a file path, same thing. No `/add` needed.
+- **Topic dive** — say "I want to learn about CRISPR" and browzy searches the web, finds sources, ingests them, and compiles your browzy automatically.
+- **Duplicate detection** — won't re-ingest the same URL or file content twice. Updates existing sources on re-add.
+- **HTML cleanup** — strips navbars, footers, cookie banners, ads before saving.
+- **Web cache** — 15-minute LRU cache so re-fetching is instant.
+- **Parallel compilation** — compiles 3 sources concurrently. Small sources get template articles without LLM calls.
+- **Image vision** — sends actual images to the LLM for multimodal description (diagrams, charts, formulas).
 
-```bash
-browzy init                           # Initialize a knowledge base
-browzy ingest <url-or-file>           # Ingest a source
-browzy compile                        # Compile wiki from sources
-browzy query "your question"          # Ask a question
-browzy search "term"                  # Full-text search
-browzy lint                           # Run health checks
-browzy status                         # Show KB overview
-```
+### Smart retrieval
+- **Relevance ranking** — articles scored by keyword density, title match, tag match, recency, and backlink authority. Not just keyword matching.
+- **Section-level chunking** — only pulls relevant sections of articles into context, not the whole thing.
+- **Token budget management** — knows each model's context window, stays within limits, auto-compacts long conversations.
+- **Follow-up awareness** — "tell me more" pulls different articles each time.
+- **Confidence scoring** — every answer rated high/medium/low based on coverage quality.
+- **Gap detection** — tells you what topics your browzy doesn't cover and suggests sources to add.
+- **Gap hunter** — after an answer with gaps, searches DuckDuckGo and pre-fills `/add <url>` for you.
+- **Query cache** — identical questions return cached answers instantly (invalidated on new ingest).
+
+### Smart output
+- **Real streaming** — tokens appear as the LLM generates them via Anthropic/OpenAI streaming APIs.
+- **Terminal markdown** — headers, bold, italic, code blocks, tables, blockquotes, bullet/numbered lists.
+- **LaTeX to Unicode** — `$\sum_{i=1}^n x_i^2$` renders as `∑ᵢ₌₁ⁿ xᵢ²` in the terminal.
+- **Clickable links** — URLs shown explicitly for cmd+click.
+- **Marp slides** — `/format marp` outputs presentation slide decks.
+- **JSON output** — `/format json` returns structured data with confidence and gaps.
+
+### Personality & engagement
+- **Research streaks** — tracks daily usage, celebrates 3/7/30-day streaks.
+- **Milestones** — "50 articles. You know more about this topic than most people alive."
+- **Playful loading** — "Digging through your notes...", "Following the thread...", "Going down the rabbit hole..."
+- **Session memory** — remembers what happened last session, shows digest on return.
+- **Insight crystallizer** — when an answer connects 2+ articles in a novel way, quietly drafts an insight article.
+- **Exit reflection** — shows session summary: questions asked, browzy growth, unresolved gaps.
+
+### Multi-provider support
+- **Claude** (default) — Anthropic API with real streaming and model picker.
+- **OpenAI** — GPT-4o, o1, o3, o4 via OpenAI API.
+- **OpenRouter** — 200+ models (Gemini, Llama, Mistral, DeepSeek, etc.) via openrouter.ai.
+- **Live model switching** — `/model` fetches available models from your account, switch by number.
+- **Paste-to-configure** — paste any API key in the prompt, browzy detects the provider and saves it.
+
+### Security
+- **Local-only** — all data at `~/.browzy/`. Nothing touches any server except the LLM API.
+- **API keys** — stored in `~/.browzy/keys.json` (chmod 600). Never sent to browzy servers (there are none).
+- **Secret redaction** — API keys stripped from error messages and exported markdown.
+- **SSRF protection** — blocks private/internal URLs in web fetch and image downloads.
+- **Path traversal protection** — sandboxed file operations.
 
 ## Source types
 
 | Type | Input | What happens |
 |------|-------|--------------|
-| **Web** | URL | Fetches HTML, converts to markdown, downloads images |
+| **Web** | URL | Fetches HTML, strips non-content, converts to markdown, downloads images |
 | **PDF** | `.pdf` file | Extracts text and metadata |
-| **Image** | `.png`, `.jpg`, `.webp`, etc. | Copies to images dir, generates LLM description for indexing |
+| **Image** | `.png`, `.jpg`, etc. | Sends to LLM for multimodal description, indexes for search |
 | **Text** | `.txt` file | Ingests with frontmatter |
 | **Markdown** | `.md` file | Ingests as-is with frontmatter |
 
-Multiple sources at once:
-```
-/add https://arxiv.org/html/2604.01548v1 ~/paper.pdf ~/notes.md
-```
-
-Drag and drop files into the terminal to paste their paths.
-
-## Output formats
-
-| Format | Command | Use case |
-|--------|---------|----------|
-| **Markdown** | `/format markdown` | Default. Rich text with headers, lists, code blocks, LaTeX |
-| **Marp** | `/format marp` | Slide decks viewable in Obsidian (Marp plugin) or exported to PDF |
-| **JSON** | `/format json` | Structured data with sections, confidence scores, and gap analysis |
+Multiple sources at once: `/add url1 url2 /path/to/file.pdf`
 
 ## Architecture
 
 ```
 browzy/
 ├── src/
-│   ├── core/                    # The engine (importable as a library)
-│   │   ├── prompts.ts           # All system prompts (412 lines, 11 prompts)
-│   │   ├── config.ts            # Config loading + env var overrides
-│   │   ├── types.ts             # Shared TypeScript types
-│   │   ├── ingest/              # Source processors (web, PDF, image, text)
-│   │   ├── compile/             # Wiki compiler (incremental, concept extraction)
-│   │   ├── query/               # Q&A engine (FTS search + LLM synthesis)
-│   │   ├── lint/                # Health checks (links, orphans, contradictions)
-│   │   ├── wiki/                # Wiki CRUD operations
+│   ├── core/                        # Engine (importable as a library)
+│   │   ├── prompts.ts               # 11 system prompts (400+ lines)
+│   │   ├── config.ts                # Config loading + env overrides
+│   │   ├── types.ts                 # Shared types (multimodal support)
+│   │   ├── ingest/                  # Source processors (web, PDF, image, text)
+│   │   ├── compile/                 # Parallel wiki compiler + concept extraction
+│   │   ├── query/
+│   │   │   ├── engine.ts            # Query + prepare (context building without LLM)
+│   │   │   ├── crystallizer.ts      # Cross-article insight detection
+│   │   │   ├── digest.ts            # Session digest generation
+│   │   │   └── historyManager.ts    # Conversation history management
+│   │   ├── retrieval/
+│   │   │   ├── contextBuilder.ts    # Relevance-ranked context assembly
+│   │   │   ├── relevanceRanker.ts   # TF-IDF + multi-signal scoring
+│   │   │   ├── tokenCounter.ts      # Segmented token estimation
+│   │   │   ├── compactor.ts         # 9-section conversation summarization
+│   │   │   ├── deduplicator.ts      # URL normalization + content hashing
+│   │   │   ├── queryCache.ts        # LRU query result cache
+│   │   │   └── webCache.ts          # 15-min web fetch cache
+│   │   ├── discovery/
+│   │   │   ├── webSearch.ts         # DuckDuckGo search (no API key)
+│   │   │   ├── gapResolver.ts       # Auto-suggest sources for gaps
+│   │   │   ├── clipboard.ts         # Clipboard watcher (opt-in)
+│   │   │   └── freshness.ts         # Stale source detection
+│   │   ├── analytics/
+│   │   │   └── costTracker.ts       # Per-call LLM cost estimation
+│   │   ├── lint/                    # Health checks (links, orphans, contradictions)
+│   │   ├── wiki/                    # Wiki CRUD operations
 │   │   ├── storage/
-│   │   │   ├── filesystem.ts    # .md file I/O with path traversal protection
-│   │   │   └── sqlite.ts        # FTS5 search index + metadata
+│   │   │   ├── filesystem.ts        # .md file I/O (path traversal protected)
+│   │   │   ├── sqlite.ts           # FTS5 with BM25 + Porter stemming
+│   │   │   └── migrations.ts       # Versioned schema migrations
 │   │   └── llm/
-│   │       └── provider.ts      # Pluggable LLM (Claude + OpenAI, real streaming)
-│   └── cli/                     # Terminal interface
-│       ├── entry.tsx            # Entry point (Ink app or Commander CLI)
-│       ├── app.tsx              # Main Ink app (React for terminals)
-│       ├── theme.ts             # Color system (dark/light, brand palette)
-│       ├── onboarding.ts        # First-run setup (name, API key, model picker)
-│       ├── components/
-│       │   ├── Banner.tsx       # Welcome screen with stats
-│       │   ├── Markdown.tsx     # Terminal markdown renderer (+ LaTeX → Unicode)
-│       │   ├── Message.tsx      # User/AI/system message display
-│       │   ├── Spinner.tsx      # Animated loading indicator
-│       │   ├── StatusBar.tsx    # Persistent footer bar
-│       │   └── Suggestions.tsx  # Autocomplete dropdown
-│       └── hooks/
-│           ├── useHistory.ts    # Persistent command history
-│           ├── useAutocomplete.ts # Slash command autocomplete
-│           └── useSession.ts    # Session persistence + export
-└── data/                        # Lives at ~/.browzy/ (not in repo)
-    ├── raw/                     # Ingested source documents
-    │   ├── *.md                 # Converted sources with YAML frontmatter
-    │   ├── images/              # Downloaded/copied images
-    │   └── _manifest.json       # Source registry
-    ├── wiki/                    # Compiled wiki
-    │   ├── *.md                 # Articles with frontmatter (tags, backlinks, sources)
-    │   └── _index.json          # Article index + concept map
-    ├── output/                  # Generated reports, slides, exports
-    ├── sessions/                # Saved conversation history
-    └── .browzy/
-        └── browzy.db            # SQLite FTS5 index
+│   │       ├── provider.ts          # Claude + OpenAI + OpenRouter (streaming)
+│   │       └── errors.ts            # Sanitized error handling
+│   ├── cli/                         # Terminal interface
+│   │   ├── entry.tsx               # Entry point (Ink app or Commander CLI)
+│   │   ├── app.tsx                 # Main app (intent detection, topic dive, etc.)
+│   │   ├── theme.ts               # Purple brand palette (dark/light)
+│   │   ├── personality.ts         # Streaks, milestones, playful copy
+│   │   ├── keystore.ts            # Secure API key storage
+│   │   ├── onboarding.ts          # First-run setup (name, key, model picker)
+│   │   ├── components/            # Ink React components
+│   │   │   ├── Banner.tsx         # Welcome screen + session digest
+│   │   │   ├── Markdown.tsx       # Terminal renderer (LaTeX, tables, code)
+│   │   │   ├── Message.tsx        # User/AI/system messages
+│   │   │   ├── StatusBar.tsx      # Model, stats, cost, hints
+│   │   │   ├── Spinner.tsx        # Animated loading
+│   │   │   └── Suggestions.tsx    # Autocomplete dropdown
+│   │   └── hooks/
+│   │       ├── useHistory.ts      # Persistent command history
+│   │       ├── useAutocomplete.ts # Slash command autocomplete
+│   │       └── useSession.ts      # Session persistence + meta
+│   └── demo/                       # Starter articles for first run
+└── data/                           # Lives at ~/.browzy/ (not in repo)
+    ├── raw/                        # Ingested sources
+    ├── wiki/                       # Compiled articles
+    ├── drafts/                     # Crystallized insights
+    ├── output/                     # Exports
+    ├── sessions/                   # Conversation history
+    ├── keys.json                   # API keys (chmod 600)
+    ├── profile.json                # User profile
+    ├── streak.json                 # Research streaks
+    ├── history.json                # Command history
+    └── .browzy/browzy.db           # SQLite FTS5 index
 ```
 
-### Key design decisions
-
-- **Data lives outside the repo** at `~/.browzy/` by default. Multiple knowledge bases are independently git-trackable.
-- **Explicit storage layer** separates filesystem (`.md` files) from SQLite (indexes, search). Swappable.
-- **Pluggable LLM** with real streaming. Claude is default, OpenAI supported. Both providers support `chat()` and `stream()`.
-- **Core is a library.** `src/core/` is importable — the CLI is just one interface. A web UI or API server can use the same engine.
-- **Ink-based TUI.** React components for the terminal. `<Static>` for completed messages (never re-renders), dynamic section for streaming + input.
-
-### Prompt engineering
-
-browzy's prompts are in `src/core/prompts.ts` — 412 lines across 11 specialized prompts. Each is purpose-built:
-
-| Prompt | Purpose |
-|--------|---------|
-| `QUERY_SYSTEM_PROMPT` | 8-section prompt for Q&A: identity, context rules, citations, formatting, math, honesty, tone, anti-patterns |
-| `COMPILER_SYSTEM_PROMPT` | Wiki compilation with quality standards and "what makes a bad article" guidance |
-| `LINTER_SYSTEM_PROMPT` | 7-category health check with strict JSON output format |
-| `SEARCH_EXTRACTION_PROMPT` | Domain-aware search term extraction with examples |
-| `CONTRADICTION_HANDLING_PROMPT` | Protocol for when new sources disagree with existing wiki |
-| `CONVERSATION_CONTEXT_PROMPT` | Multi-turn continuity rules (pronouns, follow-ups, corrections) |
-| `ARTICLE_OUTPUT_FORMAT` | Exact parser format for compiled articles |
-| `CONCEPT_EXTRACTION_PROMPT` | Bridging concepts, foundational gaps, missing counterparts |
-| `IMAGE_DESCRIPTION_PROMPT` | Systematic image analysis for indexing |
-| `MARP_OUTPUT_PROMPT` | Full Marp slide deck specification |
-| `JSON_OUTPUT_PROMPT` | Structured JSON output with confidence + gaps |
-
 ## Configuration
-
-### Config file
 
 browzy looks for config in this order:
 1. `./browzy.config.json` (current directory)
 2. `~/.browzy/config.json`
-3. Environment variables
+3. Environment variables / `~/.browzy/.env`
 4. Defaults
 
 ```json
 {
-  "dataDir": "/Users/you/.browzy/default",
+  "dataDir": "~/.browzy/default",
   "llm": {
     "provider": "claude",
     "model": "claude-sonnet-4-20250514"
@@ -267,58 +276,62 @@ browzy looks for config in this order:
 }
 ```
 
-### Environment variables
+### API keys
+
+Paste any key directly into the browzy prompt — it auto-detects the provider and saves securely:
+
+```
+› sk-ant-api03-...
+Claude API key saved.
+Stored locally at ~/.browzy/keys.json on your machine only.
+```
+
+Or set environment variables:
+
+| Variable | Provider |
+|----------|----------|
+| `ANTHROPIC_API_KEY` | Claude |
+| `OPENAI_API_KEY` | OpenAI |
+| `OPENROUTER_API_KEY` | OpenRouter (200+ models) |
+
+### Other settings
 
 | Variable | Description |
 |----------|-------------|
-| `ANTHROPIC_API_KEY` | Claude API key |
-| `OPENAI_API_KEY` | OpenAI API key (if using OpenAI provider) |
 | `BROWZY_DATA_DIR` | Override data directory |
 | `BROWZY_THEME` | Force `dark` or `light` theme |
 | `EDITOR` | Editor for Ctrl+E (defaults to `vi`) |
 
-### .env file
+## Obsidian compatibility
 
-Create a `.env` file in your project directory:
-
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-## Obsidian integration
-
-browzy's wiki is a directory of `.md` files with YAML frontmatter — fully compatible with Obsidian.
+browzy's articles are plain `.md` files with YAML frontmatter — fully compatible with Obsidian:
 
 1. Open `~/.browzy/default/wiki/` as an Obsidian vault
 2. `[[wiki-links]]` work as Obsidian internal links
-3. Install the Marp plugin to view `/format marp` slide decks
-4. The graph view shows your wiki's concept network
+3. The graph view shows your knowledge network
+4. Install Marp plugin for `/format marp` slide decks
 
 ## Tech stack
 
 - **TypeScript** (full stack)
 - **Ink** (React for terminals) + **React 19**
-- **Anthropic SDK** (Claude) + **OpenAI SDK** (GPT)
-- **SQLite** (better-sqlite3) with **FTS5** full-text search
-- **gray-matter** for YAML frontmatter
-- **Turndown** for HTML-to-markdown conversion
-- **pdf-parse** for PDF text extraction
-- **chalk** for terminal colors
-- **Commander.js** for CLI subcommands
+- **Anthropic SDK** + **OpenAI SDK** (Claude, GPT, OpenRouter)
+- **SQLite** (better-sqlite3) with **FTS5** (Porter stemming, BM25 ranking)
+- **gray-matter** (YAML frontmatter) + **Turndown** (HTML→markdown)
+- **DuckDuckGo** (web search, no API key needed)
 
 ## Development
 
 ```bash
-git clone https://github.com/VihariKanukollu/browzy.ai.git
+git clone <your-repo>
 cd browzy.ai
 npm install
 npm run build
 sudo npm link    # Makes 'browzy' available globally
-
-# Development mode (watch for changes)
-npm run dev
+npm run dev      # Watch mode
+npm test         # Run tests
 ```
 
 ## License
 
-MIT
+[MIT](LICENSE) - Vihari Kanukollu
