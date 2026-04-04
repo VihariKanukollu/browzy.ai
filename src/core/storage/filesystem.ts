@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, mkdir
 import { join, basename, extname } from 'path';
 import matter from 'gray-matter';
 import type { WikiArticle, ArticleFrontmatter, RawSource, WikiIndex } from '../types.js';
+import { safePath, safeParseJSON } from '../utils.js';
 
 export class FilesystemStorage {
   constructor(private dataDir: string) {}
@@ -14,20 +15,20 @@ export class FilesystemStorage {
   // ── Raw Sources ──────────────────────────────────────────────
 
   writeRawSource(filename: string, content: string): string {
-    const path = join(this.rawDir, filename);
+    const path = safePath(this.rawDir, filename);
     writeFileSync(path, content, 'utf-8');
     return path;
   }
 
   writeImage(filename: string, data: Buffer): string {
     mkdirSync(this.imagesDir, { recursive: true });
-    const path = join(this.imagesDir, filename);
+    const path = safePath(this.imagesDir, filename);
     writeFileSync(path, data);
     return path;
   }
 
   readRawSource(filename: string): string {
-    return readFileSync(join(this.rawDir, filename), 'utf-8');
+    return readFileSync(safePath(this.rawDir, filename), 'utf-8');
   }
 
   listRawSources(): string[] {
@@ -40,7 +41,8 @@ export class FilesystemStorage {
   getRawManifest(): RawSource[] {
     const manifestPath = join(this.rawDir, '_manifest.json');
     if (!existsSync(manifestPath)) return [];
-    return JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    const parsed = safeParseJSON(readFileSync(manifestPath, 'utf-8'));
+    return Array.isArray(parsed) ? parsed : [];
   }
 
   writeRawManifest(manifest: RawSource[]): void {
@@ -54,7 +56,7 @@ export class FilesystemStorage {
   // ── Wiki Articles ────────────────────────────────────────────
 
   readArticle(slug: string): WikiArticle | null {
-    const path = join(this.wikiDir, `${slug}.md`);
+    const path = safePath(this.wikiDir, `${slug}.md`);
     if (!existsSync(path)) return null;
     const raw = readFileSync(path, 'utf-8');
     const { data, content } = matter(raw);
@@ -67,8 +69,9 @@ export class FilesystemStorage {
   }
 
   writeArticle(slug: string, frontmatter: ArticleFrontmatter, content: string): string {
-    const path = join(this.wikiDir, `${slug}.md`);
-    const output = matter.stringify(content, frontmatter as unknown as Record<string, unknown>);
+    const path = safePath(this.wikiDir, `${slug}.md`);
+    const fmData: Record<string, unknown> = { ...frontmatter };
+    const output = matter.stringify(content, fmData);
     writeFileSync(path, output, 'utf-8');
     return path;
   }
@@ -85,7 +88,7 @@ export class FilesystemStorage {
   }
 
   deleteArticle(slug: string): void {
-    const path = join(this.wikiDir, `${slug}.md`);
+    const path = safePath(this.wikiDir, `${slug}.md`);
     if (existsSync(path)) unlinkSync(path);
   }
 
@@ -94,7 +97,9 @@ export class FilesystemStorage {
   readIndex(): WikiIndex | null {
     const path = join(this.wikiDir, '_index.json');
     if (!existsSync(path)) return null;
-    return JSON.parse(readFileSync(path, 'utf-8'));
+    const parsed = safeParseJSON(readFileSync(path, 'utf-8'));
+    if (parsed === null || typeof parsed !== 'object') return null;
+    return parsed as WikiIndex;
   }
 
   writeIndex(index: WikiIndex): void {
@@ -109,7 +114,7 @@ export class FilesystemStorage {
 
   writeOutput(filename: string, content: string): string {
     mkdirSync(this.outputDir, { recursive: true });
-    const path = join(this.outputDir, filename);
+    const path = safePath(this.outputDir, filename);
     writeFileSync(path, content, 'utf-8');
     return path;
   }

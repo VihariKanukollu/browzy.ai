@@ -1,18 +1,20 @@
 {
   "name": "browzy",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "LLM-powered personal knowledge base engine",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "browzy": "dist/cli/index.js"
+    "browzy": "dist/cli/entry.js"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/cli/index.js",
-    "lint": "tsc --noEmit"
+    "start": "node dist/cli/entry.js",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [
     "knowledge-base",
@@ -24,16 +26,21 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@types/react": "^19.2.14",
     "better-sqlite3": "^11.7.0",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
     "dotenv": "^17.4.0",
     "glob": "^11.0.1",
     "gray-matter": "^4.0.3",
+    "ink": "^6.8.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
     "mime-types": "^2.1.35",
     "openai": "^4.77.0",
     "ora": "^8.1.1",
     "pdf-parse": "^1.1.1",
+    "react": "^19.2.4",
     "turndown": "^7.2.0"
   },
   "devDependencies": {
@@ -41,6 +48,7 @@
     "@types/mime-types": "^2.1.4",
     "@types/node": "^22.10.0",
     "@types/turndown": "^5.0.5",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.2"
   }
 }

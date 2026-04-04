@@ -4,10 +4,12 @@ import { createHash } from 'crypto';
 import { lookup } from 'mime-types';
 import type { RawSource } from '../types.js';
 import type { LLMProvider } from '../llm/provider.js';
+import { IMAGE_DESCRIPTION_PROMPT } from '../prompts.js';
+import { slugify, checkFileSize } from '../utils.js';
+import { sanitizeUnicode } from '../sanitization.js';
 
-/**
- * Ingest an image file. Uses the LLM to generate a description/transcription.
- */
+const MAX_IMAGE_SIZE = 50 * 1024 * 1024; // 50 MB
+
 export async function ingestImage(
   filePath: string,
   dataDir: string,
@@ -17,9 +19,11 @@ export async function ingestImage(
     throw new Error(`File not found: ${filePath}`);
   }
 
+  checkFileSize(filePath, MAX_IMAGE_SIZE);
+
   const ext = extname(filePath).toLowerCase();
-  const title = basename(filePath, ext);
-  const id = createHash('md5').update(filePath).digest('hex').slice(0, 12);
+  const title = sanitizeUnicode(basename(filePath, ext));
+  const id = createHash('sha256').update(filePath).digest('hex').slice(0, 12);
 
   // Copy image to images directory
   const imgFilename = `${id}${ext}`;
@@ -32,18 +36,16 @@ export async function ingestImage(
     const imageData = readFileSync(filePath).toString('base64');
     const mimeType = lookup(ext) || 'image/png';
     try {
-      // For now, we pass a message asking for description.
-      // The actual multimodal API call depends on the provider.
       const response = await llm.chat(
         [
           {
             role: 'user',
-            content: `Describe this image in detail for a research knowledge base. Include any text, diagrams, data, or key visual elements. The image is: ${title}`,
+            content: `Describe this image in detail. The image is: ${title}`,
           },
         ],
-        { system: 'You are a research assistant. Describe images thoroughly for indexing in a knowledge base.' }
+        { system: IMAGE_DESCRIPTION_PROMPT }
       );
-      description = `![${title}](images/${imgFilename})\n\n## Description\n\n${response.content}`;
+      description = `![${title}](images/${imgFilename})\n\n## Description\n\n${sanitizeUnicode(response.content)}`;
     } catch {
       description = `![${title}](images/${imgFilename})\n\n*Image description pending — LLM unavailable during ingest.*`;
     }
@@ -52,11 +54,11 @@ export async function ingestImage(
   const filename = `${slugify(title)}-${id}.md`;
   const frontmatter = [
     '---',
-    `title: "${title.replace(/"/g, '\\"')}"`,
-    `source: "${filePath}"`,
+    `title: ${JSON.stringify(title)}`,
+    `source: ${JSON.stringify(filePath)}`,
     `type: image`,
-    `image: "images/${imgFilename}"`,
-    `ingested: "${new Date().toISOString()}"`,
+    `image: ${JSON.stringify('images/' + imgFilename)}`,
+    `ingested: ${JSON.stringify(new Date().toISOString())}`,
     '---',
     '',
   ].join('\n');
@@ -73,12 +75,4 @@ export async function ingestImage(
     images: [imgDest],
     ingestedAt: new Date().toISOString(),
   };
-}
-
-function slugify(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 60);
 }

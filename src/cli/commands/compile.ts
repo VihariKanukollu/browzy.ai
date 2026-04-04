@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { WikiCompiler } from '../../core/compile/index.js';
 import { getConfigAndLLM, ensureDirs, spinner, success, info, error } from '../helpers.js';
+import { clampInt } from '../../core/utils.js';
 
 export const compileCommand = new Command('compile')
   .description('Compile raw sources into wiki articles')
@@ -16,7 +17,7 @@ export const compileCommand = new Command('compile')
 
       const compiler = new WikiCompiler(config.dataDir, llm);
       const result = await compiler.compile({
-        batchSize: parseInt(opts.batchSize),
+        batchSize: clampInt(opts.batchSize, 1, 100, 20),
         extractConcepts: opts.concepts !== false,
       });
 

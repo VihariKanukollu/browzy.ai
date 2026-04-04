@@ -115,6 +115,7 @@ export class SQLiteStorage {
   }
 
   search(query: string, limit = 10): SearchResult[] {
+    limit = Math.min(Math.max(limit, 1), 1000);
     // Sanitize query for FTS5: strip special chars, quote each term
     const sanitized = query
       .replace(/[^\w\s]/g, ' ')

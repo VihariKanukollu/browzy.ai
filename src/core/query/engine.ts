@@ -2,14 +2,7 @@ import { FilesystemStorage } from '../storage/filesystem.js';
 import { SQLiteStorage } from '../storage/sqlite.js';
 import type { LLMProvider } from '../llm/provider.js';
 import type { WikiArticle } from '../types.js';
-
-const SYSTEM_PROMPT = `You are a research assistant with access to a personal knowledge base wiki. Answer questions by synthesizing information from the wiki articles provided as context.
-
-Rules:
-- Cite specific articles using [[article-slug]] notation
-- Be precise and factual — only state what the wiki supports
-- If the wiki doesn't contain enough information, say so clearly
-- When asked to generate output (reports, slides, etc.), use the appropriate format`;
+import { QUERY_SYSTEM_PROMPT as SYSTEM_PROMPT, SEARCH_EXTRACTION_PROMPT, MARP_OUTPUT_PROMPT, JSON_OUTPUT_PROMPT } from '../prompts.js';
 
 export interface QueryResult {
   answer: string;
@@ -43,41 +36,44 @@ export class QueryEngine {
     const format = options?.format ?? 'markdown';
     const save = options?.save ?? false;
 
-    // 1. Find relevant articles via FTS search
-    const searchTerms = await this.extractSearchTerms(question);
-    const relevantArticles = await this.gatherContext(searchTerms);
+    try {
+      // 1. Find relevant articles via FTS search
+      const searchTerms = await this.extractSearchTerms(question);
+      const relevantArticles = await this.gatherContext(searchTerms);
 
-    // 2. Build context from articles
-    const context = this.buildContext(relevantArticles);
+      // 2. Build context from articles
+      const context = this.buildContext(relevantArticles);
 
-    // 3. Query the LLM
-    const formatInstruction = this.getFormatInstruction(format);
-    const prompt = `${context}
+      // 3. Query the LLM
+      const formatInstruction = this.getFormatInstruction(format);
+      const prompt = `${context}
 
 QUESTION: ${question}
 
 ${formatInstruction}`;
 
-    const response = await this.llm.chat(
-      [{ role: 'user', content: prompt }],
-      { system: SYSTEM_PROMPT, maxTokens: 8192 }
-    );
+      const response = await this.llm.chat(
+        [{ role: 'user', content: prompt }],
+        { system: SYSTEM_PROMPT, maxTokens: 8192 }
+      );
 
-    const sourcesUsed = relevantArticles.map(a => a.slug);
-    const result: QueryResult = {
-      answer: response.content,
-      sourcesUsed,
-    };
+      const sourcesUsed = relevantArticles.map(a => a.slug);
+      const result: QueryResult = {
+        answer: response.content,
+        sourcesUsed,
+      };
 
-    // 4. Save output if requested
-    if (save) {
-      const ext = format === 'json' ? 'json' : 'md';
-      const filename = `query-${Date.now()}.${ext}`;
-      result.outputPath = this.fs.writeOutput(filename, response.content);
+      // 4. Save output if requested
+      if (save) {
+        const ext = format === 'json' ? 'json' : 'md';
+        const filename = `query-${Date.now()}.${ext}`;
+        result.outputPath = this.fs.writeOutput(filename, response.content);
+      }
+
+      return result;
+    } finally {
+      this.db.close();
     }
-
-    this.db.close();
-    return result;
   }
 
   /**
@@ -95,10 +91,10 @@ ${formatInstruction}`;
       [
         {
           role: 'user',
-          content: `Extract 3-5 key search terms from this question for searching a research wiki. Output only the terms, one per line.\n\nQuestion: ${question}`,
+          content: `Question: ${question}`,
         },
       ],
-      { maxTokens: 256 }
+      { system: SEARCH_EXTRACTION_PROMPT, maxTokens: 256 }
     );
 
     const terms = response.content
@@ -163,26 +159,12 @@ ${formatInstruction}`;
   private getFormatInstruction(format: OutputFormat): string {
     switch (format) {
       case 'marp':
-        return `Output your answer as a Marp slide deck. Use this format:
----
-marp: true
-theme: default
----
-
-# Slide Title
-
-Content here
-
----
-
-# Next Slide
-
-More content`;
+        return MARP_OUTPUT_PROMPT;
       case 'json':
-        return 'Output your answer as a JSON object with "title", "summary", "sections" (array of {heading, content}), and "sources" fields.';
+        return JSON_OUTPUT_PROMPT;
       case 'markdown':
       default:
-        return 'Output your answer as well-structured markdown with headers, lists, and citations.';
+        return 'Output your answer as well-structured markdown with headers, lists, and citations using [[article-slug]] notation.';
     }
   }
 }

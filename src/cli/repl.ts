@@ -39,9 +39,13 @@ export class BrowzyRepl {
     this.llm = createProvider(this.config.llm);
   }
 
+  private drawPromptArea(): void {
+    const cols = process.stdout.columns || 60;
+    console.log(p('─'.repeat(cols)));
+  }
+
   start(): void {
-    const separator = p('─'.repeat(process.stdout.columns || 60));
-    console.log(separator);
+    this.drawPromptArea();
 
     this.rl = readline.createInterface({
       input: process.stdin,
@@ -75,13 +79,15 @@ export class BrowzyRepl {
       }
 
       this.rl.resume();
+      this.drawPromptArea();
       this.rl.prompt();
     };
 
-    this.rl.on('line', (line) => { handleLine(line); });
+    this.rl.on('line', (line) => { void handleLine(line).catch(err => console.log(chalk.red('  unexpected error: ') + (err instanceof Error ? err.message : String(err)))); });
 
     this.rl.on('SIGINT', () => {
       console.log();
+      this.drawPromptArea();
       this.rl.prompt();
     });
 

@@ -61,7 +61,7 @@ export interface WikiIndex {
 
 // ── LLM ──────────────────────────────────────────────────────────
 
-export type LLMProvider = 'claude' | 'openai';
+export type LLMProvider = 'claude' | 'openai' | 'openrouter';
 
 export interface LLMConfig {
   provider: LLMProvider;

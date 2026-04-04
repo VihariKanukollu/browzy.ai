@@ -1,6 +1,7 @@
 import { FilesystemStorage } from '../storage/filesystem.js';
 import type { LLMProvider } from '../llm/provider.js';
-import type { WikiArticle, LintIssue } from '../types.js';
+import type { WikiArticle, LintIssue, LintSeverity } from '../types.js';
+import { LINTER_SYSTEM_PROMPT } from '../prompts.js';
 
 export class WikiLinter {
   private fs: FilesystemStorage;
@@ -134,7 +135,7 @@ Output a JSON array of objects with "severity" (error/warning/suggestion), "arti
         },
       ],
       {
-        system: 'You are a wiki quality checker. Be precise and only flag real issues.',
+        system: LINTER_SYSTEM_PROMPT,
         maxTokens: 2048,
       }
     );
@@ -142,7 +143,23 @@ Output a JSON array of objects with "severity" (error/warning/suggestion), "arti
     try {
       const jsonMatch = response.content.match(/\[[\s\S]*\]/);
       if (!jsonMatch) return [];
-      return JSON.parse(jsonMatch[0]) as LintIssue[];
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (!Array.isArray(parsed)) return [];
+      const validSeverities = new Set(['error', 'warning', 'suggestion']);
+      return parsed
+        .filter((item: unknown): item is Record<string, unknown> =>
+          typeof item === 'object' && item !== null &&
+          typeof (item as Record<string, unknown>).severity === 'string' &&
+          typeof (item as Record<string, unknown>).article === 'string' &&
+          typeof (item as Record<string, unknown>).message === 'string' &&
+          validSeverities.has((item as Record<string, unknown>).severity as string)
+        )
+        .map((item: Record<string, unknown>) => ({
+          severity: item.severity as LintSeverity,
+          article: String(item.article),
+          message: String(item.message),
+          suggestion: typeof item.suggestion === 'string' ? item.suggestion : undefined,
+        }));
     } catch {
       return [];
     }

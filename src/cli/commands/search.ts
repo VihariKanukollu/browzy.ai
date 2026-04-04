@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { Wiki } from '../../core/wiki/index.js';
 import { getConfig, ensureDirs, info, error } from '../helpers.js';
+import { clampInt } from '../../core/utils.js';
 
 export const searchCommand = new Command('search')
   .description('Search the knowledge base')
@@ -13,7 +14,7 @@ export const searchCommand = new Command('search')
       ensureDirs(config);
 
       const wiki = new Wiki(config.dataDir);
-      const results = wiki.search(query, parseInt(opts.limit));
+      const results = wiki.search(query, clampInt(opts.limit, 1, 100, 10));
 
       if (results.length === 0) {
         info('No results found');

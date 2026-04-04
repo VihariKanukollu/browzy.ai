@@ -32,9 +32,23 @@ export function loadConfig(configPath?: string): BrowzyConfig {
 
   for (const path of candidates) {
     if (existsSync(path)) {
-      const raw = readFileSync(path, 'utf-8');
-      const userConfig = JSON.parse(raw) as Partial<BrowzyConfig>;
-      return mergeConfig(DEFAULT_CONFIG, userConfig);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(path, 'utf-8'));
+      } catch {
+        throw new Error(`Invalid JSON in config file: ${path}`);
+      }
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error(`Invalid config: expected an object in ${path}`);
+      }
+      const obj = parsed as Record<string, unknown>;
+      if (obj.dataDir !== undefined && typeof obj.dataDir !== 'string') {
+        throw new Error(`Invalid config: dataDir must be a string`);
+      }
+      if (obj.llm !== undefined && (typeof obj.llm !== 'object' || obj.llm === null)) {
+        throw new Error(`Invalid config: llm must be an object`);
+      }
+      return mergeConfig(DEFAULT_CONFIG, obj as Partial<BrowzyConfig>);
     }
   }
 
@@ -61,6 +75,9 @@ function applyEnvOverrides(config: BrowzyConfig): BrowzyConfig {
   }
   if (process.env.OPENAI_API_KEY && config.llm.provider === 'openai') {
     config.llm.apiKey = process.env.OPENAI_API_KEY;
+  }
+  if (process.env.OPENROUTER_API_KEY && config.llm.provider === 'openrouter') {
+    config.llm.apiKey = process.env.OPENROUTER_API_KEY;
   }
   if (process.env.BROWZY_DATA_DIR) {
     config.dataDir = process.env.BROWZY_DATA_DIR;

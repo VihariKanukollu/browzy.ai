@@ -67,17 +67,20 @@ export async function ingest(
 
   // Index in SQLite
   const db = new SQLiteStorage(dataDir);
-  db.upsertSource({
-    id: source.id,
-    type: source.type,
-    title: source.title,
-    origin: source.origin,
-    path: source.path,
-    summary: source.summary,
-    tags: source.tags,
-    ingestedAt: source.ingestedAt,
-  });
-  db.close();
+  try {
+    db.upsertSource({
+      id: source.id,
+      type: source.type,
+      title: source.title,
+      origin: source.origin,
+      path: source.path,
+      summary: source.summary,
+      tags: source.tags,
+      ingestedAt: source.ingestedAt,
+    });
+  } finally {
+    db.close();
+  }
 
   return source;
 }

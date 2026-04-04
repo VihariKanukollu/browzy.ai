@@ -7,4 +7,6 @@ export { WikiCompiler } from './compile/index.js';
 export { QueryEngine } from './query/index.js';
 export { WikiLinter } from './lint/index.js';
 export { Wiki } from './wiki/index.js';
+export { sanitizeUnicode, sanitizeDeep } from './sanitization.js';
+export { slugify, safePath, safeParseJSON, checkFileSize, fetchWithTimeout, clampInt } from './utils.js';
 export type * from './types.js';
