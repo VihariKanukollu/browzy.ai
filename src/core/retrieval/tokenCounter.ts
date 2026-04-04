@@ -68,6 +68,14 @@ const CONTEXT_WINDOWS: Record<string, number> = {
   'o1': 200000,
   'o3': 200000,
   'o4': 200000,
+  'llama3': 131072,
+  'llama2': 4096,
+  'llama': 8192,
+  'mistral': 32768,
+  'qwen': 32768,
+  'gemma': 8192,
+  'phi': 128000,
+  'deepseek': 32768,
   'default': 128000,
 };
 

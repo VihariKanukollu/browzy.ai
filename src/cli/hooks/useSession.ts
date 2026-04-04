@@ -89,18 +89,12 @@ export function useSession() {
       lastUpdated: new Date().toISOString(),
     };
 
-    // Atomic write: write to temp file then rename
+    // Write directly — atomic write-then-rename was removed because it races
+    // with process exit on /quit (SIGINT/SIGTERM handlers call saveOnce synchronously,
+    // and rename may not complete before the process dies). Direct write is safer here
+    // since the signal handlers already ensure single-writer via savedRef guard.
     const finalPath = join(SESSIONS_DIR, `${sessionId}.json`);
-    const tmpPath = finalPath + '.tmp';
-    writeFileSync(tmpPath, JSON.stringify(session, null, 2), 'utf-8');
-    const { renameSync } = require('fs') as typeof import('fs');
-    try {
-      renameSync(tmpPath, finalPath);
-    } catch {
-      // Fallback: direct write if rename fails (cross-device)
-      writeFileSync(finalPath, JSON.stringify(session, null, 2), 'utf-8');
-      try { unlinkSync(tmpPath); } catch { /* ignore */ }
-    }
+    writeFileSync(finalPath, JSON.stringify(session, null, 2), 'utf-8');
 
     // Prune old sessions — sort by mtime, keep newest
     try {

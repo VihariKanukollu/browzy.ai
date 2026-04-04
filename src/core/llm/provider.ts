@@ -1,4 +1,5 @@
 import type { LLMConfig, LLMMessage, LLMResponse } from '../types.js';
+import { classifyError } from './errors.js';
 
 export interface LLMProvider {
   chat(messages: LLMMessage[], options?: ChatOptions): Promise<LLMResponse>;
@@ -9,6 +10,8 @@ export interface ChatOptions {
   maxTokens?: number;
   temperature?: number;
   system?: string;
+  /** Enable prompt caching for the system message (Anthropic-specific) */
+  cacheSystem?: boolean;
 }
 
 export interface StreamChunk {
@@ -72,6 +75,8 @@ export function createProvider(config: LLMConfig): LLMProvider {
       return new OpenAIProvider(config);
     case 'openrouter':
       return new OpenRouterProvider(config);
+    case 'ollama':
+      return new OllamaProvider(config);
     default:
       throw new Error(`Unknown LLM provider: ${config.provider}`);
   }
@@ -82,11 +87,27 @@ export function createProvider(config: LLMConfig): LLMProvider {
  * Used for zero-config first run where LLM is optional.
  */
 export function tryCreateProvider(config: LLMConfig): LLMProvider | null {
-  if (!config.apiKey) return null;
+  // Ollama doesn't need an API key — it's local
+  if (!config.apiKey && config.provider !== 'ollama') return null;
   try {
     return createProvider(config);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Check if Ollama is running locally.
+ * Returns true if the Ollama server responds at the given base URL.
+ */
+export async function isOllamaRunning(baseUrl = 'http://localhost:11434'): Promise<boolean> {
+  try {
+    const response = await fetch(`${baseUrl}/api/tags`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    return response.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -115,27 +136,44 @@ class ClaudeProvider implements LLMProvider {
         content: formatContentForAnthropic(m.content),
       }));
 
+    // Build system parameter — optionally with prompt caching
+    let systemParam: string | Array<{ type: string; text: string; cache_control?: { type: string } }> | undefined;
+    if (systemMsg) {
+      if (options?.cacheSystem) {
+        systemParam = [{
+          type: 'text',
+          text: systemMsg,
+          cache_control: { type: 'ephemeral' },
+        }];
+      } else {
+        systemParam = systemMsg;
+      }
+    }
+
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         const response = await client.messages.create({
           model: this.config.model || 'claude-sonnet-4-20250514',
           max_tokens: options?.maxTokens ?? 4096,
-          ...(systemMsg ? { system: systemMsg as string } : {}),
+          ...(systemParam ? { system: systemParam as any } : {}),
           messages: nonSystemMessages as any,
         });
 
         const textBlock = response.content.find(b => b.type === 'text');
+        const rawUsage = response.usage as any;
         return {
           content: textBlock?.text ?? '',
           usage: {
-            inputTokens: response.usage.input_tokens,
-            outputTokens: response.usage.output_tokens,
+            inputTokens: rawUsage?.input_tokens || 0,
+            outputTokens: rawUsage?.output_tokens || 0,
+            cacheWriteTokens: rawUsage?.cache_creation_input_tokens || 0,
+            cacheReadTokens: rawUsage?.cache_read_input_tokens || 0,
           },
         };
       } catch (err: any) {
-        if (err.status === 429 && attempt < MAX_RETRIES) {
-          const retryAfter = err.headers?.get?.('retry-after') ?? err.headers?.['retry-after'];
-          const delay = getRetryDelay(attempt, retryAfter);
+        const classified = classifyError(err);
+        if (classified.retryable && attempt < MAX_RETRIES) {
+          const delay = classified.retryAfterMs ?? getRetryDelay(attempt, null);
           await new Promise(r => setTimeout(r, delay));
           continue;
         }
@@ -158,10 +196,24 @@ class ClaudeProvider implements LLMProvider {
         content: formatContentForAnthropic(m.content),
       }));
 
+    // Build system parameter — optionally with prompt caching (same logic as chat())
+    let streamSystemParam: string | Array<{ type: string; text: string; cache_control?: { type: string } }> | undefined;
+    if (systemMsg) {
+      if (options?.cacheSystem) {
+        streamSystemParam = [{
+          type: 'text',
+          text: systemMsg,
+          cache_control: { type: 'ephemeral' },
+        }];
+      } else {
+        streamSystemParam = systemMsg;
+      }
+    }
+
     const stream = client.messages.stream({
       model: this.config.model || 'claude-sonnet-4-20250514',
       max_tokens: options?.maxTokens ?? 4096,
-      ...(systemMsg ? { system: systemMsg as string } : {}),
+      ...(streamSystemParam ? { system: streamSystemParam as any } : {}),
       messages: nonSystemMessages as any,
     });
 
@@ -213,9 +265,9 @@ class OpenAIProvider implements LLMProvider {
             : undefined,
         };
       } catch (err: any) {
-        if (err.status === 429 && attempt < MAX_RETRIES) {
-          const retryAfter = err.headers?.get?.('retry-after') ?? err.headers?.['retry-after'];
-          const delay = getRetryDelay(attempt, retryAfter);
+        const classified = classifyError(err);
+        if (classified.retryable && attempt < MAX_RETRIES) {
+          const delay = classified.retryAfterMs ?? getRetryDelay(attempt, null);
           await new Promise(r => setTimeout(r, delay));
           continue;
         }
@@ -282,17 +334,38 @@ class OpenRouterProvider implements LLMProvider {
 
   async chat(messages: LLMMessage[], options?: ChatOptions): Promise<LLMResponse> {
     const client = await this.getClient();
+    const modelName = this.config.model || 'anthropic/claude-sonnet-4';
+    const isAnthropic = modelName.startsWith('anthropic/');
 
-    const allMessages = options?.system
-      ? [{ role: 'system' as const, content: options.system }, ...messages.filter(m => m.role !== 'system')]
-      : messages;
+    // For Anthropic models via OpenRouter, support prompt caching on system message
+    let allMessages: Array<{ role: string; content: any }>;
+    if (options?.system && options.cacheSystem && isAnthropic) {
+      allMessages = [
+        {
+          role: 'system' as const,
+          content: [{
+            type: 'text',
+            text: options.system,
+            cache_control: { type: 'ephemeral' },
+          }],
+        },
+        ...messages.filter(m => m.role !== 'system'),
+      ];
+    } else if (options?.system) {
+      allMessages = [
+        { role: 'system' as const, content: options.system },
+        ...messages.filter(m => m.role !== 'system'),
+      ];
+    } else {
+      allMessages = [...messages];
+    }
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         const response = await client.chat.completions.create({
-          model: this.config.model || 'anthropic/claude-sonnet-4',
+          model: modelName,
           max_tokens: options?.maxTokens ?? 4096,
-          messages: allMessages.map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) })) as any,
+          messages: allMessages.map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : (Array.isArray(m.content) ? m.content : JSON.stringify(m.content)) })) as any,
         });
 
         return {
@@ -305,9 +378,9 @@ class OpenRouterProvider implements LLMProvider {
             : undefined,
         };
       } catch (err: any) {
-        if (err.status === 429 && attempt < MAX_RETRIES) {
-          const retryAfter = err.headers?.get?.('retry-after') ?? err.headers?.['retry-after'];
-          const delay = getRetryDelay(attempt, retryAfter);
+        const classified = classifyError(err);
+        if (classified.retryable && attempt < MAX_RETRIES) {
+          const delay = classified.retryAfterMs ?? getRetryDelay(attempt, null);
           await new Promise(r => setTimeout(r, delay));
           continue;
         }
@@ -339,5 +412,134 @@ class OpenRouterProvider implements LLMProvider {
         yield { delta, snapshot: accumulated };
       }
     }
+  }
+}
+
+/**
+ * Ollama provider — uses the local Ollama server for free LLM inference.
+ * No API key needed. Default endpoint: http://localhost:11434
+ * Default model: llama3.2 (small, fast, good for Q&A)
+ */
+class OllamaProvider implements LLMProvider {
+  private baseUrl: string;
+  private model: string;
+
+  constructor(config: LLMConfig) {
+    const baseUrl = config.baseUrl || 'http://localhost:11434';
+    // Ollama must point to localhost — block remote endpoints to prevent sending prompts to untrusted servers
+    try {
+      const parsed = new URL(baseUrl);
+      if (parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1' && parsed.hostname !== '[::1]') {
+        throw new Error('Ollama baseUrl must be localhost. Remote Ollama endpoints are not supported.');
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.includes('Ollama baseUrl')) throw e;
+      throw new Error('Invalid Ollama baseUrl');
+    }
+    this.baseUrl = baseUrl;
+    this.model = config.model || 'llama3.2';
+  }
+
+  async chat(messages: LLMMessage[], options?: ChatOptions): Promise<LLMResponse> {
+    const body = {
+      model: this.model,
+      messages: this.formatMessages(messages, options?.system),
+      stream: false,
+      options: {
+        temperature: options?.temperature ?? 0.7,
+        num_predict: options?.maxTokens ?? 4096,
+      },
+    };
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await fetch(`${this.baseUrl}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(120000), // 2 min timeout for local models
+        });
+
+        if (!response.ok) {
+          throw new Error(`Ollama error: ${response.status} ${response.statusText}`);
+        }
+
+        const result = await response.json() as any;
+        return {
+          content: result.message?.content || '',
+          usage: {
+            inputTokens: result.prompt_eval_count || 0,
+            outputTokens: result.eval_count || 0,
+          },
+        };
+      } catch (err: any) {
+        if (attempt < MAX_RETRIES && (err.name === 'AbortError' || err.message?.includes('ECONNREFUSED'))) {
+          const delay = getRetryDelay(attempt);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        throw sanitizeError(err, 'Ollama');
+      }
+    }
+    throw new Error('Unreachable');
+  }
+
+  async *stream(messages: LLMMessage[], options?: ChatOptions): AsyncIterable<StreamChunk> {
+    const body = {
+      model: this.model,
+      messages: this.formatMessages(messages, options?.system),
+      stream: true,
+      options: {
+        temperature: options?.temperature ?? 0.7,
+        num_predict: options?.maxTokens ?? 4096,
+      },
+    };
+
+    const response = await fetch(`${this.baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120000),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ollama error: ${response.status} ${response.statusText}`);
+    }
+
+    let accumulated = '';
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('No response body from Ollama');
+
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const text = decoder.decode(value, { stream: true });
+      // Ollama streams one JSON object per line
+      for (const line of text.split('\n').filter(l => l.trim())) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.message?.content) {
+            accumulated += parsed.message.content;
+            yield { delta: parsed.message.content, snapshot: accumulated };
+          }
+        } catch { /* skip malformed lines */ }
+      }
+    }
+  }
+
+  private formatMessages(messages: LLMMessage[], system?: string): Array<{ role: string; content: string }> {
+    const result: Array<{ role: string; content: string }> = [];
+    if (system) {
+      result.push({ role: 'system', content: system });
+    }
+    for (const msg of messages) {
+      if (typeof msg.content !== 'string') {
+        throw new Error('Ollama does not support image content. Use Claude or GPT-4o.');
+      }
+      result.push({ role: msg.role, content: msg.content });
+    }
+    return result;
   }
 }

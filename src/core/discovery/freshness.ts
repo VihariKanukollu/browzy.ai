@@ -11,6 +11,8 @@ import type { RawSource } from '../types.js';
 function isPrivateUrl(urlStr: string): boolean {
   try {
     const parsed = new URL(urlStr);
+    // Block non-HTTP protocols (file://, ftp://, data://, etc.)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return true;
     const host = parsed.hostname.toLowerCase();
     if (host === 'localhost' || host === '0.0.0.0' || host.endsWith('.local') || host.endsWith('.internal')) return true;
     const stripped = host.replace(/^\[|\]$/g, '');

@@ -6,8 +6,9 @@ import { homedir } from 'os';
 
 // Load .env: cwd/.env first (local project config), then ~/.browzy/.env (global fallback).
 // dotenv.config() won't overwrite already-set vars, so local takes precedence.
-dotenv.config(); // cwd/.env — local project config loaded first
-dotenv.config({ path: join(homedir(), '.browzy', '.env') }); // global fallback
+// quiet: true suppresses "injecting env" debug output from dotenv v17+.
+dotenv.config({ quiet: true });
+dotenv.config({ path: join(homedir(), '.browzy', '.env'), quiet: true });
 
 import React from 'react';
 import { render } from 'ink';

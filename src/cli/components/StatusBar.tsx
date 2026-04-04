@@ -9,6 +9,7 @@ interface StatusBarProps {
   tokenUsage?: { input: number; output: number };
   hint?: string;
   temporaryStatus?: string;
+  costStatus?: string;
 }
 
 export const StatusBar: React.FC<StatusBarProps> = ({
@@ -18,6 +19,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   tokenUsage,
   hint,
   temporaryStatus,
+  costStatus,
 }) => {
   const theme = getTheme();
   const { stdout } = useStdout();
@@ -48,6 +50,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           )}
         </Box>
         <Box>
+          {costStatus && <Text color={theme.textMuted}>{costStatus} · </Text>}
           <Text color={theme.textMuted}>{model} </Text>
         </Box>
       </Box>

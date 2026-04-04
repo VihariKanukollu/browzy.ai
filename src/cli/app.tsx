@@ -22,11 +22,11 @@ import {
   getAddReward, getQueryReward, getExitMessage, getHealthReward, computeReflection,
 } from './personality.js';
 import { getKey, saveKey, looksLikeApiKey } from './keystore.js';
-import { loadConfig, ensureDataDirs, createProvider, tryCreateProvider } from '../core/index.js';
+import { loadConfig, ensureDataDirs, createProvider, tryCreateProvider, isOllamaRunning, classifyError, costTracker } from '../core/index.js';
 import { seedDemoKB } from '../core/demo/seed.js';
 import { ingest } from '../core/ingest/index.js';
 import { WikiCompiler } from '../core/compile/index.js';
-import { QueryEngine } from '../core/query/index.js';
+import { QueryEngine, buildLLMHistory } from '../core/query/index.js';
 import { WikiLinter } from '../core/lint/index.js';
 import { Wiki } from '../core/wiki/index.js';
 import { compactConversation } from '../core/retrieval/index.js';
@@ -95,6 +95,9 @@ export const BrowzyApp: React.FC = () => {
   const { stdout } = useStdout();
   const cols = stdout.columns || 80;
 
+  // Reset cost tracker at the start of each session
+  useState(() => { costTracker.reset(); });
+
   // State
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -105,10 +108,12 @@ export const BrowzyApp: React.FC = () => {
   const [stashedInput, setStashedInput] = useState<string | null>(null);
   const [currentModel, setCurrentModel] = useState('');
   const [lastModelList, setLastModelList] = useState<Array<{ id: string; display_name: string }>>([]);
+  const [lastModelProvider, setLastModelProvider] = useState<string>('');
   const [crystallizedThisSession, setCrystallizedThisSession] = useState(false);
   const [outputFormat, setOutputFormat] = useState<OutputFormat>('markdown');
   const [sessionGaps, setSessionGaps] = useState<string[]>([]);
   const [pendingDive, setPendingDive] = useState<{ topic: string; originalInput: string } | null>(null);
+  const [costStatus, setCostStatus] = useState('');
 
   // Refs for input/loading (no forward-reference issues)
   const inputRef = useRef(input);
@@ -170,6 +175,32 @@ export const BrowzyApp: React.FC = () => {
   outputFormatRef.current = outputFormat;
   const crystallizedRef = useRef(crystallizedThisSession);
   crystallizedRef.current = crystallizedThisSession;
+
+  // Auto-detect Ollama on startup when no LLM provider is configured
+  const ollamaCheckRanRef = useRef(false);
+  useEffect(() => {
+    if (ollamaCheckRanRef.current || llm) return;
+    ollamaCheckRanRef.current = true;
+    isOllamaRunning().then(async (running) => {
+      if (running && !llmRef.current) {
+        try {
+          // Fetch installed models from Ollama
+          const resp = await fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(2000) });
+          const data = await resp.json() as any;
+          const models: string[] = (data.models || []).map((m: any) => m.name || m.model).filter(Boolean);
+          if (models.length === 0) return; // No models installed — skip auto-connect
+          const selectedModel = models[0];
+          const ollamaConfig = { provider: 'ollama' as const, apiKey: '', model: selectedModel };
+          const provider = createProvider(ollamaConfig);
+          setLlm(provider);
+          llmRef.current = provider;
+          setConfig(prev => ({ ...prev, llm: ollamaConfig }));
+          setCurrentModel(`${selectedModel} (local)`);
+          session.addMessage('system', `Detected local Ollama server — connected to ${selectedModel} (free, runs on your machine). Or paste an API key for Claude/GPT.`);
+        } catch { /* Ollama detection failed silently */ }
+      }
+    }).catch(() => { /* Ollama not available */ });
+  }, [llm]);
 
   // Snapshot stats at session start for exit reflection
   const statsAtStartRef = useRef(stats);
@@ -266,12 +297,12 @@ export const BrowzyApp: React.FC = () => {
   // Clipboard watcher — opt-in only
   useEffect(() => {
     if (!config.clipboard?.enabled) return;
-    initClipboard();
+    initClipboard().catch(() => {});
 
     // #12: filter sensitive data; #19: poll every 5s instead of 3s
     const sensitivePatterns = [/sk-ant-[a-zA-Z0-9\-_]{20,}/, /sk-[a-zA-Z0-9\-_]{48,}/, /sk-or-[a-zA-Z0-9\-_]{20,}/, /AKIA[A-Z0-9]{16}/, /^.{6,30}$/];
     const timer = setInterval(async () => {
-      const newContent = checkClipboardChange();
+      const newContent = await checkClipboardChange();
       if (newContent && llmRef.current) {
         // Skip content that looks like API keys or passwords
         const lines = newContent.trim().split('\n');
@@ -389,10 +420,12 @@ export const BrowzyApp: React.FC = () => {
     pendingActionRef.current = action;
     setAwaitingApiKey(true);
     session.addMessage('system', [
-      'To ' + (action.type === 'query' ? 'answer questions' : 'add sources') + ', I need an API key.',
+      'To ' + (action.type === 'query' ? 'answer questions' : 'add sources') + ', I need an LLM.',
       '',
-      'Paste your Anthropic API key (starts with sk-ant-...)',
-      'Or paste an OpenAI key (sk-...) or OpenRouter key (sk-or-...).',
+      'Options:',
+      '  1. Install Ollama for free local inference: ollama.com (run "ollama serve")',
+      '  2. Paste your Anthropic API key (starts with sk-ant-...)',
+      '  3. Or paste an OpenAI key (sk-...) or OpenRouter key (sk-or-...).',
       '',
       'Get a Claude key at: console.anthropic.com/settings/keys',
     ].join('\n'));
@@ -416,16 +449,10 @@ export const BrowzyApp: React.FC = () => {
 
       // #6: Single LLM call — stream directly with the prepared context (no double call)
       let finalText = '';
+      // #17: smart history — filters system messages, uses token-aware truncation
+      const recentHistory = buildLLMHistory(session.messages);
+      const systemPrompt = prepared.systemPrompt + '\n\n' + CONVERSATION_CONTEXT_PROMPT;
       try {
-        // #17: filter to only user/assistant roles for LLM history
-        const recentHistory = session.messages.slice(-6)
-          .filter(m => m.role === 'user' || m.role === 'assistant')
-          .map(m => ({
-            role: m.role as 'user' | 'assistant',
-            content: m.content.slice(0, 500),
-          }));
-
-        const systemPrompt = prepared.systemPrompt + '\n\n' + CONVERSATION_CONTEXT_PROMPT;
 
         for await (const chunk of currentLlm.stream(
           [...recentHistory, { role: 'user' as const, content: prepared.prompt }],
@@ -441,13 +468,24 @@ export const BrowzyApp: React.FC = () => {
             }, 250);
           }
         }
+        // Estimate tokens for streaming (no usage returned from stream API)
+        // Rough estimate: ~4 chars per token
+        const historyChars = recentHistory.reduce((s, m) => s + m.content.length, 0);
+        const estInput = Math.ceil((systemPrompt.length + prepared.prompt.length + historyChars) / 4);
+        const estOutput = Math.ceil(finalText.length / 4);
+        costTracker.recordQuery(config.llm.model || 'claude-sonnet-4', { inputTokens: estInput, outputTokens: estOutput });
+        setCostStatus(costTracker.formatStatus());
       } catch {
-        // Fallback: non-streaming call
+        // Fallback: non-streaming call — include conversation history
         const response = await currentLlm.chat(
-          [{ role: 'user', content: prepared.prompt }],
+          [...recentHistory, { role: 'user', content: prepared.prompt }],
           { system: prepared.systemPrompt, maxTokens: 8192 }
         );
         finalText = response.content;
+        if (response.usage) {
+          costTracker.recordQuery(config.llm.model || 'claude-sonnet-4', response.usage);
+          setCostStatus(costTracker.formatStatus());
+        }
       }
 
       // Build a result object for downstream consumers (crystallizer, gaps, etc.)
@@ -543,7 +581,12 @@ export const BrowzyApp: React.FC = () => {
       }
     } catch (err: any) {
       setStreamingText('');
-      session.addMessage('system', `Error: ${err.message}`);
+      const classified = classifyError(err);
+      session.addMessage('system', classified.userMessage);
+      if (classified.action === 'reprompt_key') {
+        setLlm(null);
+        llmRef.current = null;
+      }
     }
 
     setLoading(false);
@@ -561,19 +604,44 @@ export const BrowzyApp: React.FC = () => {
       case '/add': {
         if (!args) { session.addMessage('system', 'Drop a URL or file path after /add. Drag files into the terminal to paste their paths.'); return; }
         if (!requireLlm({ type: 'add', value: args })) return;
-        const sources = parseMultipleSources(args);
+
+        let sources: string[];
+        if (args.startsWith('--from ')) {
+          const filePath = args.replace('--from ', '').trim();
+          try {
+            const content = rfs(filePath, 'utf-8');
+            const rawLines = content.split('\n').map(l => l.trim().replace(/^\d+\.\s*/, '')).filter(l => l && !l.startsWith('#'));
+            // Validate each line looks like a URL or file path
+            sources = rawLines.flatMap(l => parseMultipleSources(l)).filter(Boolean);
+            if (sources.length === 0 && rawLines.length > 0) {
+              session.addMessage('system', `${filePath} contains ${rawLines.length} line(s) but none look like URLs or file paths.`);
+              return;
+            }
+            session.addMessage('system', `Reading ${filePath}... ${sources.length} source${sources.length !== 1 ? 's' : ''} found.`);
+          } catch (err: any) {
+            session.addMessage('system', `Can't read ${filePath}: ${err.message}`);
+            return;
+          }
+        } else {
+          sources = parseMultipleSources(args);
+        }
+
+        if (sources.length === 0) { session.addMessage('system', 'No valid sources found. Use URLs or file paths.'); return; }
+
         setLoading(true);
+        const total = sources.length;
+        if (total > 1) session.addMessage('system', `Ingesting ${total} sources...`);
         const addedTitles: string[] = [];
 
-        for (let i = 0; i < sources.length; i++) {
-          setLoadingLabel(getIngestingMessage());
+        for (let i = 0; i < total; i++) {
+          setLoadingLabel(`Ingesting (${i + 1}/${total})...`);
           try {
             const result = await ingest(sources[i], config.dataDir, { llm: llmRef.current! });
             addedTitles.push(result.title);
             recordSourceAdded();
-            session.addMessage('system', `✓ ${result.title}`);
+            session.addMessage('system', `✓ [${i + 1}/${total}] "${result.title}"`);
           } catch (err: any) {
-            session.addMessage('system', `✗ ${sources[i]}: ${err.message}`);
+            session.addMessage('system', `✗ [${i + 1}/${total}] Failed: ${err.message}`);
           }
         }
 
@@ -581,7 +649,11 @@ export const BrowzyApp: React.FC = () => {
         let created = 0, updated = 0;
         try {
           const compiler = new WikiCompiler(config.dataDir, llmRef.current!);
-          const result = await compiler.compile({ batchSize: config.compile.batchSize, extractConcepts: config.compile.extractConcepts });
+          const result = await compiler.compile({
+            batchSize: config.compile.batchSize,
+            extractConcepts: config.compile.extractConcepts,
+            onProgress: (cur, tot, title) => setLoadingLabel(`Compiling (${cur}/${tot}): ${title.slice(0, 40)}...`),
+          });
           created = result.articlesCreated.length;
           updated = result.articlesUpdated.length;
         } catch (err: any) {
@@ -628,7 +700,11 @@ export const BrowzyApp: React.FC = () => {
         setLoading(true); setLoadingLabel(getCompilingMessage());
         try {
           const compiler = new WikiCompiler(config.dataDir, llmRef.current!);
-          const r = await compiler.compile({ batchSize: config.compile.batchSize, extractConcepts: config.compile.extractConcepts });
+          const r = await compiler.compile({
+            batchSize: config.compile.batchSize,
+            extractConcepts: config.compile.extractConcepts,
+            onProgress: (cur, tot, title) => setLoadingLabel(`Compiling (${cur}/${tot}): ${title.slice(0, 40)}...`),
+          });
           const total = r.articlesCreated.length + r.articlesUpdated.length;
           session.addMessage('system', total === 0
             ? 'Your browzy is up to date. Nothing to rebuild.'
@@ -637,7 +713,7 @@ export const BrowzyApp: React.FC = () => {
         setLoading(false); refreshStats(); break;
       }
       case '/model': {
-        const switchTo = (provider: 'claude' | 'openai' | 'openrouter', modelId: string, apiKey: string, displayName?: string) => {
+        const switchTo = (provider: 'claude' | 'openai' | 'openrouter' | 'ollama', modelId: string, apiKey: string, displayName?: string) => {
           const newLlmConfig = { provider, model: modelId, apiKey };
           const newConfig = { ...config, llm: newLlmConfig };
           setConfig(newConfig);
@@ -651,11 +727,13 @@ export const BrowzyApp: React.FC = () => {
           const num = parseInt(args, 10);
           if (!isNaN(num) && num >= 1 && num <= lastModelList.length) {
             const picked = lastModelList[num - 1];
-            // Determine provider from model ID
-            const provider = picked.id.startsWith('claude') ? 'claude' as const
+            // Determine provider from model ID (use tracked provider for Ollama)
+            const provider = lastModelProvider === 'ollama' ? 'ollama' as const
+              : picked.id.startsWith('claude') ? 'claude' as const
               : picked.id.includes('/') ? 'openrouter' as const
               : 'openai' as const;
-            const apiKey = provider === 'claude' ? (getKey('anthropic') || config.llm.apiKey)
+            const apiKey = provider === 'ollama' ? ''
+              : provider === 'claude' ? (getKey('anthropic') || config.llm.apiKey)
               : provider === 'openrouter' ? (getKey('openrouter') || config.llm.apiKey)
               : (getKey('openai') || config.llm.apiKey);
             switchTo(provider, picked.id, apiKey, picked.display_name);
@@ -671,6 +749,10 @@ export const BrowzyApp: React.FC = () => {
           // /model openai — show OpenAI models
           else if (args === 'openai') {
             await fetchAndShowModels('openai');
+          }
+          // /model ollama — show/connect Ollama models
+          else if (args === 'ollama') {
+            await fetchAndShowModels('ollama');
           }
           // /model <exact-model-id> — direct switch
           else {
@@ -699,6 +781,7 @@ export const BrowzyApp: React.FC = () => {
             hasAnthropic ? '  /model claude       Browse Claude models' : '  /model claude       Paste your API key to enable',
             hasOpenRouter ? '  /model openrouter   Browse 200+ models (GPT, Gemini, Llama, Mistral...)' : '  /model openrouter   Paste your API key to enable (openrouter.ai)',
             hasOpenAI ? '  /model openai       Browse OpenAI models' : '  /model openai       Paste your API key to enable',
+            '  /model ollama       Use local Ollama models (free, no API key needed)',
             '',
             `  Current: ${currentModel}`,
           ];
@@ -767,7 +850,28 @@ export const BrowzyApp: React.FC = () => {
                 .map((m: { id: string }) => ({ id: m.id, display_name: m.id }));
             }
 
+            else if (provider === 'ollama') {
+              const running = await isOllamaRunning();
+              if (!running) {
+                session.addMessage('system', 'Ollama is not running. Start it with:\n\n  ollama serve\n\nInstall from ollama.com if needed.');
+                setLoading(false); return;
+              }
+              try {
+                const resp = await fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(5000) });
+                const data = await resp.json() as { models?: Array<{ name: string; size: number }> };
+                models = (data.models || []).map(m => ({ id: m.name, display_name: `${m.name} (${(m.size / 1e9).toFixed(1)}GB)` }));
+                if (models.length === 0) {
+                  session.addMessage('system', 'No models installed in Ollama. Pull one with:\n\n  ollama pull llama3.2\n  ollama pull mistral\n  ollama pull qwen2.5');
+                  setLoading(false); return;
+                }
+              } catch {
+                session.addMessage('system', 'Could not fetch Ollama models.');
+                setLoading(false); return;
+              }
+            }
+
             setLastModelList(models);
+            setLastModelProvider(provider);
 
             if (models.length === 0) {
               session.addMessage('system', 'No models found. Check your API key.');
@@ -879,7 +983,10 @@ export const BrowzyApp: React.FC = () => {
             // Recompile
             setLoadingLabel('Recompiling...');
             const compiler = new WikiCompiler(config.dataDir, llmRef.current!);
-            await compiler.compile({ batchSize: config.compile.batchSize });
+            await compiler.compile({
+              batchSize: config.compile.batchSize,
+              onProgress: (cur, tot, title) => setLoadingLabel(`Recompiling (${cur}/${tot}): ${title.slice(0, 40)}...`),
+            });
           }
         } catch (err: any) {
           session.addMessage('system', `Refresh error: ${err.message}`);
@@ -893,6 +1000,7 @@ export const BrowzyApp: React.FC = () => {
           'Just type a question — your browzy will find the answer.',
           '',
           '/add <sources...>     Feed your browzy (URLs, PDFs, images, .md, .txt)',
+          '                      Supports: multiple URLs, --from <file.txt>',
           '/search <term>        Find articles in your browzy',
           '/format <type>        Output format: markdown, marp, json',
           '/copy                 Copy last answer to clipboard',
@@ -1226,15 +1334,17 @@ export const BrowzyApp: React.FC = () => {
       {/* Status bar */}
       <StatusBar model={currentModel} sources={stats.sources} articles={stats.articles}
         hint={loading ? undefined : 'Tab complete · ↑↓ history · Ctrl+E editor · Ctrl+S stash'}
-        temporaryStatus={tempStatus} />
+        temporaryStatus={tempStatus} costStatus={costStatus} />
     </>
   );
 };
 
 function parseMultipleSources(args: string): string[] {
-  const sources: string[] = [];
-  const regex = /"([^"]+)"|'([^']+)'|(\S+)/g;
-  let match;
-  while ((match = regex.exec(args)) !== null) sources.push(match[1] || match[2] || match[3]);
-  return sources;
+  // Extract URLs directly — handles numbered lists like "1. https://..." gracefully
+  const urls = args.match(/https?:\/\/[^\s,]+/gi) || [];
+  // Extract file paths (start with / or ~/ or ./ or ../ and have an extension)
+  const paths = args.match(/(?:\/|~\/|\.\/|\.\.\/)[^\s,]+\.\w{2,5}/g) || [];
+  // Also match bare filenames with extensions (paper.pdf, notes.md)
+  const bareFiles = args.match(/(?:^|\s)([\w.-]+\.\w{2,5})(?:\s|$)/g)?.map(s => s.trim()) || [];
+  return [...new Set([...urls, ...paths, ...bareFiles])];
 }

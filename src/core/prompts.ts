@@ -345,6 +345,16 @@ Rules for summaries:
 - Should be independently understandable (don't reference other articles)
 - Include key terms for search discoverability`;
 
+// ── Composite compiler system prompt (merged for token efficiency) ──
+
+export const COMPILER_FULL_SYSTEM = [
+  COMPILER_SYSTEM_PROMPT,
+  '\n\n--- CONTRADICTION PROTOCOL ---\n\n',
+  CONTRADICTION_HANDLING_PROMPT,
+  '\n\n--- OUTPUT FORMAT ---\n\n',
+  ARTICLE_OUTPUT_FORMAT,
+].join('');
+
 
 // ── Output Format Instructions ──────────────────────────────────
 

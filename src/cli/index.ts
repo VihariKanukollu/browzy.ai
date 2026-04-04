@@ -10,8 +10,8 @@ import { join } from 'path';
 import { homedir } from 'os';
 
 // Load .env: cwd/.env first (local), then ~/.browzy/.env (global fallback)
-dotenv.config(); // cwd/.env — local project config loaded first
-dotenv.config({ path: join(homedir(), '.browzy', '.env') }); // global fallback
+dotenv.config({ quiet: true });
+dotenv.config({ path: join(homedir(), '.browzy', '.env'), quiet: true });
 import { Command } from 'commander';
 import { initCommand } from './commands/init.js';
 import { ingestCommand } from './commands/ingest.js';

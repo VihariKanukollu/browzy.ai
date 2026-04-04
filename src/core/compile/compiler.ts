@@ -4,7 +4,7 @@ import { SQLiteStorage } from '../storage/sqlite.js';
 import type { LLMProvider } from '../llm/provider.js';
 import type { RawSource, WikiArticle, ArticleFrontmatter, WikiIndex } from '../types.js';
 import { sanitizeUnicode } from '../sanitization.js';
-import { COMPILER_SYSTEM_PROMPT as SYSTEM_PROMPT, CONCEPT_EXTRACTION_PROMPT, CONTRADICTION_HANDLING_PROMPT, ARTICLE_OUTPUT_FORMAT } from '../prompts.js';
+import { COMPILER_SYSTEM_PROMPT as SYSTEM_PROMPT, CONCEPT_EXTRACTION_PROMPT, COMPILER_FULL_SYSTEM } from '../prompts.js';
 
 export interface CompileResult {
   articlesCreated: string[];
@@ -27,7 +27,7 @@ export class WikiCompiler {
    * Run incremental compilation: process new/updated sources,
    * update affected articles, extract new concepts.
    */
-  async compile(options?: { batchSize?: number; extractConcepts?: boolean }): Promise<CompileResult> {
+  async compile(options?: { batchSize?: number; extractConcepts?: boolean; onProgress?: (current: number, total: number, title: string) => void }): Promise<CompileResult> {
     const batchSize = options?.batchSize ?? 20;
     const extractConcepts = options?.extractConcepts ?? true;
 
@@ -57,35 +57,81 @@ export class WikiCompiler {
       // 3. Process sources in batches
       const batch = newSources.slice(0, batchSize);
 
+      // Pre-index raw sources for immediate FTS searchability (no LLM call needed)
       for (const source of batch) {
         try {
           const filename = basename(source.path);
-          const rawContent = sanitizeUnicode(this.fs.readRawSource(filename));
+          const rawContent = this.fs.readRawSource(filename);
+          this.db.indexArticle({
+            slug: `raw-${source.id}`,
+            title: source.title || filename,
+            summary: source.summary || rawContent.slice(0, 200),
+            content: rawContent.slice(0, 50000),
+            tags: source.tags || [],
+            createdAt: source.ingestedAt,
+            updatedAt: source.ingestedAt,
+          });
+        } catch { /* skip — raw indexing is best-effort */ }
+      }
 
-          // Generate or update articles from this source
-          const articles = await this.compileSource(source, rawContent, existingArticles);
+      // Compile sources in parallel (3 concurrent LLM calls)
+      const CONCURRENCY = 3;
+      let processed = 0;
+      const usedSlugs = new Set<string>(existingArticles.map(a => a.slug));
+      for (let i = 0; i < batch.length; i += CONCURRENCY) {
+        const chunk = batch.slice(i, i + CONCURRENCY);
+        const results = await Promise.allSettled(
+          chunk.map(async (source) => {
+            const filename = basename(source.path);
+            const rawContent = sanitizeUnicode(this.fs.readRawSource(filename));
 
-          for (const article of articles) {
-            const existing = existingArticles.find(a => a.slug === article.slug);
-            if (existing) {
-              result.articlesUpdated.push(article.slug);
-            } else {
-              result.articlesCreated.push(article.slug);
+            // Trivial source — create template article without LLM call
+            if (rawContent.length < 2000) {
+              const articles = this.createTemplateArticle(source, rawContent);
+              return { source, articles };
             }
 
-            this.fs.writeArticle(article.slug, article.frontmatter, article.content);
-            this.db.indexArticle({
-              slug: article.slug,
-              title: article.frontmatter.title,
-              summary: article.frontmatter.summary,
-              content: article.content,
-              tags: article.frontmatter.tags,
-              createdAt: article.frontmatter.created,
-              updatedAt: article.frontmatter.updated,
-            });
+            return { source, articles: await this.compileSource(source, rawContent, existingArticles) };
+          })
+        );
+
+        for (const r of results) {
+          processed++;
+          if (r.status === 'fulfilled') {
+            options?.onProgress?.(processed, batch.length, r.value.source.title);
+            for (const article of r.value.articles) {
+              // Deduplicate slugs within the batch to prevent overwrites
+              if (usedSlugs.has(article.slug)) {
+                article.slug = `${article.slug}-${r.value.source.id.slice(0, 6)}`;
+              }
+              usedSlugs.add(article.slug);
+
+              const existing = existingArticles.find(a => a.slug === article.slug);
+              if (existing) {
+                result.articlesUpdated.push(article.slug);
+              } else {
+                result.articlesCreated.push(article.slug);
+              }
+
+              this.fs.writeArticle(article.slug, article.frontmatter, article.content);
+              this.db.indexArticle({
+                slug: article.slug,
+                title: article.frontmatter.title,
+                summary: article.frontmatter.summary,
+                content: article.content,
+                tags: article.frontmatter.tags,
+                createdAt: article.frontmatter.created,
+                updatedAt: article.frontmatter.updated,
+              });
+            }
+          } else {
+            options?.onProgress?.(processed, batch.length, chunk[results.indexOf(r)]?.title || 'unknown');
           }
-        } catch {
-          // Skip failed sources — continue processing remaining batch
+        }
+
+        // Clean up ALL raw pre-index entries for this batch (regardless of success/failure)
+        for (const source of chunk) {
+          try { this.db.removeArticle(`raw-${source.id}`); } catch { /* ok if not found */ }
         }
       }
 
@@ -106,12 +152,42 @@ export class WikiCompiler {
     }
   }
 
+  private estimateMaxTokens(contentLength: number): number {
+    if (contentLength < 2000) return 2048;
+    if (contentLength < 5000) return 3072;
+    if (contentLength < 10000) return 4096;
+    return 8192;
+  }
+
+  private createTemplateArticle(source: RawSource, content: string): WikiArticle[] {
+    const slug = (source.title || source.id)
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80);
+    const now = new Date().toISOString();
+    return [{
+      slug,
+      frontmatter: {
+        title: source.title || slug,
+        tags: source.tags || [],
+        sources: [source.id],
+        backlinks: [],
+        created: now,
+        updated: now,
+        summary: content.slice(0, 150).replace(/\n/g, ' ').trim(),
+      },
+      content,
+      path: '',
+    }];
+  }
+
   private async compileSource(
     source: RawSource,
     content: string,
     existingArticles: WikiArticle[]
   ): Promise<WikiArticle[]> {
-    const existingIndex = existingArticles.map(a => `- ${a.slug}: ${a.frontmatter.title} — ${a.frontmatter.summary}`).join('\n');
+    const existingIndex = existingArticles
+      .slice(0, 30)
+      .map(a => `- ${a.slug}: ${a.frontmatter.title}`)
+      .join('\n');
 
     const prompt = `Compile the following raw source into wiki articles.
 
@@ -133,15 +209,11 @@ INSTRUCTIONS:
 3. You may output multiple articles if the source covers multiple distinct topics.
 4. Use [[slug]] to link between articles. Link to existing articles where relevant.
 5. Cite this source as [${source.id}].
-6. If the new source contradicts existing wiki content, follow the contradiction protocol below.
-
-${CONTRADICTION_HANDLING_PROMPT}
-
-${ARTICLE_OUTPUT_FORMAT}`;
+6. If the new source contradicts existing wiki content, follow the contradiction protocol in the system prompt.`;
 
     const response = await this.llm.chat(
       [{ role: 'user', content: prompt }],
-      { system: SYSTEM_PROMPT, maxTokens: 8192 }
+      { system: COMPILER_FULL_SYSTEM, maxTokens: this.estimateMaxTokens(content.length), cacheSystem: true }
     );
 
     return this.parseArticles(response.content, source.id);

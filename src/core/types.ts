@@ -67,12 +67,14 @@ export interface WikiIndex {
 
 // ── LLM ──────────────────────────────────────────────────────────
 
-export type LLMProviderName = 'claude' | 'openai' | 'openrouter';
+export type LLMProviderName = 'claude' | 'openai' | 'openrouter' | 'ollama';
 
 export interface LLMConfig {
   provider: LLMProviderName;
   apiKey: string;
   model?: string;
+  /** Base URL override (used by Ollama, custom endpoints) */
+  baseUrl?: string;
 }
 
 export interface ImageContent {
@@ -99,6 +101,8 @@ export interface LLMResponse {
   usage?: {
     inputTokens: number;
     outputTokens: number;
+    cacheWriteTokens?: number;
+    cacheReadTokens?: number;
   };
 }
 
