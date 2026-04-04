@@ -4,6 +4,7 @@ tsconfig.json
 
 # Local config & secrets
 .env
+.omc
 browzy.config.json
 *.db
 *.db-wal

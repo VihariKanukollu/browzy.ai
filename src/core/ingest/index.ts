@@ -7,6 +7,7 @@ import { ingestWeb } from './web.js';
 import { ingestPdf } from './pdf.js';
 import { ingestText } from './text.js';
 import { ingestImage } from './image.js';
+import { queryCache } from '../retrieval/queryCache.js';
 
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp']);
 
@@ -30,8 +31,20 @@ export function detectSourceType(input: string): SourceType {
 export async function ingest(
   input: string,
   dataDir: string,
-  options?: { llm?: LLMProvider; type?: SourceType }
+  options?: { llm?: LLMProvider; type?: SourceType; skipDuplicateCheck?: boolean }
 ): Promise<RawSource> {
+  // Check for duplicates before ingesting
+  let existingSource: RawSource | undefined;
+  if (!options?.skipDuplicateCheck) {
+    const { checkDuplicate } = await import('../retrieval/deduplicator.js');
+    const fsStore = new FilesystemStorage(dataDir);
+    const manifest = fsStore.getRawManifest();
+    const dupCheck = checkDuplicate(input, manifest);
+    if (dupCheck.isDuplicate) {
+      existingSource = dupCheck.existingSource;
+    }
+  }
+
   const type = options?.type ?? detectSourceType(input);
 
   let source: RawSource;
@@ -53,6 +66,16 @@ export async function ingest(
       throw new Error(`Unsupported source type: ${type}`);
   }
 
+  // If re-ingesting, warn and preserve original timestamp
+  if (existingSource) {
+    console.warn(`⚠ Updating existing source: ${existingSource.title}. Re-compile to update the article.`);
+    source.firstIngestedAt = existingSource.firstIngestedAt ?? existingSource.ingestedAt;
+    source.ingestedAt = new Date().toISOString();
+    source.isUpdate = true;
+    // Preserve the original source ID so the slug stays stable
+    source.id = existingSource.id;
+  }
+
   // Update manifest
   const fs = new FilesystemStorage(dataDir);
   const manifest = fs.getRawManifest();
@@ -64,6 +87,9 @@ export async function ingest(
     manifest.push(source);
   }
   fs.writeRawManifest(manifest);
+
+  // Invalidate query cache — new data means old answers may be stale
+  queryCache.invalidate();
 
   // Index in SQLite
   const db = new SQLiteStorage(dataDir);

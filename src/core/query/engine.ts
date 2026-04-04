@@ -1,159 +1,127 @@
 import { FilesystemStorage } from '../storage/filesystem.js';
-import { SQLiteStorage } from '../storage/sqlite.js';
 import type { LLMProvider } from '../llm/provider.js';
-import type { WikiArticle } from '../types.js';
 import { QUERY_SYSTEM_PROMPT as SYSTEM_PROMPT, SEARCH_EXTRACTION_PROMPT, MARP_OUTPUT_PROMPT, JSON_OUTPUT_PROMPT } from '../prompts.js';
+import { ContextBuilder } from '../retrieval/contextBuilder.js';
+import { calculateBudget } from '../retrieval/tokenCounter.js';
+import { queryCache } from '../retrieval/queryCache.js';
 
 export interface QueryResult {
   answer: string;
   sourcesUsed: string[];
-  /** If the answer was saved as an output file */
   outputPath?: string;
+  confidence: 'high' | 'medium' | 'low';
+  gaps: string[];
+  tokensBudget?: { used: number; total: number };
 }
 
 export type OutputFormat = 'markdown' | 'marp' | 'json';
 
 export class QueryEngine {
   private fs: FilesystemStorage;
-  private db: SQLiteStorage;
   private llm: LLMProvider;
   private dataDir: string;
+  /** Track which articles were used in previous queries this session */
+  private usedSlugs = new Set<string>();
 
   constructor(dataDir: string, llm: LLMProvider) {
     this.dataDir = dataDir;
     this.fs = new FilesystemStorage(dataDir);
-    this.db = new SQLiteStorage(dataDir);
     this.llm = llm;
   }
 
   /**
-   * Answer a question using the wiki as context.
+   * Answer a question using relevance-ranked article context.
    */
   async query(
     question: string,
-    options?: { format?: OutputFormat; save?: boolean }
+    options?: {
+      format?: OutputFormat;
+      save?: boolean;
+      model?: string;
+      followUp?: boolean;  // If true, exclude previously-used articles
+      conversationHistory?: Array<{ role: string; content: string }>;
+    }
   ): Promise<QueryResult> {
     const format = options?.format ?? 'markdown';
     const save = options?.save ?? false;
+    const model = options?.model ?? 'claude-sonnet-4-20250514';
 
-    try {
-      // 1. Find relevant articles via FTS search
-      const searchTerms = await this.extractSearchTerms(question);
-      const relevantArticles = await this.gatherContext(searchTerms);
+    // Check query cache for identical prior result
+    const cached = queryCache.get(question, format, model);
+    if (cached) return cached as QueryResult;
 
-      // 2. Build context from articles
-      const context = this.buildContext(relevantArticles);
+    // 1. Calculate token budget
+    const budget = calculateBudget(
+      model,
+      SYSTEM_PROMPT,
+      options?.conversationHistory ?? [],
+    );
 
-      // 3. Query the LLM
-      const formatInstruction = this.getFormatInstruction(format);
-      const prompt = `${context}
+    // 2. Build context with relevance ranking + budget enforcement
+    const contextBuilder = new ContextBuilder(this.dataDir);
+    const builtContext = contextBuilder.build(question, {
+      articleBudget: budget.articleBudget,
+      excludeSlugs: options?.followUp ? this.usedSlugs : undefined,
+    });
+
+    // Track used articles for follow-up awareness
+    for (const scored of builtContext.articlesUsed) {
+      this.usedSlugs.add(scored.article.slug);
+    }
+
+    // 3. Build the prompt
+    const formatInstruction = this.getFormatInstruction(format);
+    const confidenceNote = builtContext.confidence === 'low'
+      ? '\n\nNote: Your browzy has limited coverage on this topic. Flag what you know vs what you\'re inferring from general knowledge.'
+      : '';
+
+    const gapNote = builtContext.gaps.length > 0
+      ? `\n\nCoverage gaps detected for: ${builtContext.gaps.join(', ')}. Suggest sources the user could add.`
+      : '';
+
+    const prompt = `${builtContext.context}${confidenceNote}${gapNote}
 
 QUESTION: ${question}
 
 ${formatInstruction}`;
 
-      const response = await this.llm.chat(
-        [{ role: 'user', content: prompt }],
-        { system: SYSTEM_PROMPT, maxTokens: 8192 }
-      );
+    // 4. Query the LLM
+    const response = await this.llm.chat(
+      [{ role: 'user', content: prompt }],
+      { system: SYSTEM_PROMPT, maxTokens: 8192 }
+    );
 
-      const sourcesUsed = relevantArticles.map(a => a.slug);
-      const result: QueryResult = {
-        answer: response.content,
-        sourcesUsed,
-      };
+    const sourcesUsed = builtContext.articlesUsed.map(a => a.article.slug);
 
-      // 4. Save output if requested
-      if (save) {
-        const ext = format === 'json' ? 'json' : 'md';
-        const filename = `query-${Date.now()}.${ext}`;
-        result.outputPath = this.fs.writeOutput(filename, response.content);
-      }
+    const result: QueryResult = {
+      answer: response.content,
+      sourcesUsed,
+      confidence: builtContext.confidence,
+      gaps: builtContext.gaps,
+      tokensBudget: {
+        used: response.usage?.inputTokens ?? builtContext.tokenCount,
+        total: budget.contextWindow,
+      },
+    };
 
-      return result;
-    } finally {
-      this.db.close();
+    // 5. Cache the result for future identical queries
+    queryCache.set(question, format, model, result);
+
+    // 6. Save output if requested
+    if (save) {
+      const ext = format === 'json' ? 'json' : 'md';
+      const filename = `query-${Date.now()}.${ext}`;
+      result.outputPath = this.fs.writeOutput(filename, response.content);
     }
+
+    return result;
   }
 
   /**
-   * Use LLM to extract good search terms from the question.
+   * Reset follow-up tracking (e.g., when topic changes).
    */
-  private async extractSearchTerms(question: string): Promise<string[]> {
-    // First try direct FTS — often good enough
-    const directResults = this.db.search(question, 5);
-    if (directResults.length >= 3) {
-      return [question];
-    }
-
-    // Ask LLM for better search terms
-    const response = await this.llm.chat(
-      [
-        {
-          role: 'user',
-          content: `Question: ${question}`,
-        },
-      ],
-      { system: SEARCH_EXTRACTION_PROMPT, maxTokens: 256 }
-    );
-
-    const terms = response.content
-      .split('\n')
-      .map(t => t.replace(/^[-*\d.]+\s*/, '').trim())
-      .filter(t => t.length > 0);
-
-    return terms.length > 0 ? terms : [question];
-  }
-
-  private async gatherContext(searchTerms: string[]): Promise<WikiArticle[]> {
-    const slugs = new Set<string>();
-    const articles: WikiArticle[] = [];
-
-    // Search for each term
-    for (const term of searchTerms) {
-      try {
-        const results = this.db.search(term, 5);
-        for (const r of results) {
-          if (!slugs.has(r.slug)) {
-            slugs.add(r.slug);
-            const article = this.fs.readArticle(r.slug);
-            if (article) articles.push(article);
-          }
-        }
-      } catch {
-        // FTS query syntax errors — skip
-      }
-    }
-
-    // If no search results, fall back to loading the index
-    if (articles.length === 0) {
-      const index = this.fs.readIndex();
-      if (index) {
-        for (const entry of index.articles.slice(0, 10)) {
-          const article = this.fs.readArticle(entry.slug);
-          if (article) articles.push(article);
-        }
-      }
-    }
-
-    return articles;
-  }
-
-  private buildContext(articles: WikiArticle[]): string {
-    if (articles.length === 0) {
-      return 'WIKI CONTEXT: No relevant articles found in the knowledge base.';
-    }
-
-    const sections = articles.map(a => {
-      // Truncate very long articles to stay within context
-      const content = a.content.length > 5000
-        ? a.content.slice(0, 5000) + '\n\n[...truncated]'
-        : a.content;
-
-      return `### [[${a.slug}]] — ${a.frontmatter.title}\nTags: ${a.frontmatter.tags.join(', ')}\n\n${content}`;
-    });
-
-    return `WIKI CONTEXT (${articles.length} articles):\n\n${sections.join('\n\n---\n\n')}`;
+  resetFollowUp(): void {
+    this.usedSlugs.clear();
   }
 
   private getFormatInstruction(format: OutputFormat): string {

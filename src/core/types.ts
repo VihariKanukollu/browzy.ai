@@ -18,6 +18,10 @@ export interface RawSource {
   images: string[];
   /** When this source was ingested */
   ingestedAt: string;
+  /** Original ingest timestamp preserved across re-ingests */
+  firstIngestedAt?: string;
+  /** True when this source was re-ingested (updated) */
+  isUpdate?: boolean;
   /** Brief LLM-generated summary */
   summary?: string;
   /** Extracted tags/topics */

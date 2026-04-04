@@ -28,6 +28,7 @@ import { WikiCompiler } from '../core/compile/index.js';
 import { QueryEngine } from '../core/query/index.js';
 import { WikiLinter } from '../core/lint/index.js';
 import { Wiki } from '../core/wiki/index.js';
+import { compactConversation } from '../core/retrieval/index.js';
 import { QUERY_SYSTEM_PROMPT, CONVERSATION_CONTEXT_PROMPT } from '../core/prompts.js';
 import type { BrowzyConfig, LintIssue } from '../core/types.js';
 import type { LLMProvider } from '../core/llm/provider.js';
@@ -219,11 +220,40 @@ export const BrowzyApp: React.FC = () => {
 
       setStreamingText('');
       session.addMessage('assistant', finalText || fullResult.answer, fullResult.sourcesUsed);
-      setTempStatus(getQueryReward(fullResult.sourcesUsed.length));
+
+      // Show confidence + gaps
+      const rewardParts = [getQueryReward(fullResult.sourcesUsed.length)];
+      if (fullResult.confidence === 'low') {
+        rewardParts.push('Coverage is thin on this topic.');
+      }
+      if (fullResult.gaps && fullResult.gaps.length > 0) {
+        rewardParts.push(`Try /add to cover: ${fullResult.gaps.join(', ')}`);
+      }
+      setTempStatus(rewardParts.filter(Boolean).join(' '));
 
       // Check for milestones
       const milestone = checkMilestones(stats);
-      if (milestone) session.addMessage('system', `\n${milestone}`);
+      if (milestone) session.addMessage('system', milestone);
+
+      // Auto-compact if conversation is getting long (>20 messages)
+      if (session.messages.length > 20) {
+        try {
+          const compacted = await compactConversation(
+            session.messages.map(m => ({ role: m.role, content: m.content })),
+            llm,
+            6, // Keep last 6 messages
+          );
+          if (compacted.summary) {
+            // Replace messages with compacted version
+            session.setMessages(compacted.keptMessages.map(m => ({
+              id: Date.now().toString(36) + Math.random().toString(36).slice(2, 4),
+              role: m.role as 'user' | 'assistant' | 'system',
+              content: m.content,
+              timestamp: Date.now(),
+            })));
+          }
+        } catch { /* compaction failed, continue with full history */ }
+      }
     } catch (err: any) {
       setStreamingText('');
       session.addMessage('system', `Error: ${err.message}`);
@@ -245,13 +275,13 @@ export const BrowzyApp: React.FC = () => {
         if (!args) { session.addMessage('system', 'Drop a URL or file path after /add. Drag files into the terminal to paste their paths.'); return; }
         const sources = parseMultipleSources(args);
         setLoading(true);
-        let lastTitle = '';
+        const addedTitles: string[] = [];
 
         for (let i = 0; i < sources.length; i++) {
           setLoadingLabel(getIngestingMessage());
           try {
             const result = await ingest(sources[i], config.dataDir, { llm });
-            lastTitle = result.title;
+            addedTitles.push(result.title);
             recordSourceAdded();
             session.addMessage('system', `✓ ${result.title}`);
           } catch (err: any) {
@@ -273,12 +303,14 @@ export const BrowzyApp: React.FC = () => {
         refreshStats();
 
         // Playful reward
-        const newStats = stats;
-        const reward = getAddReward(lastTitle, created, updated, newStats.articles + created);
-        if (reward) session.addMessage('system', reward);
+        const displayTitle = addedTitles.length === 1 ? addedTitles[0] : `${addedTitles.length} sources`;
+        if (addedTitles.length > 0 || created > 0 || updated > 0) {
+          const reward = getAddReward(displayTitle, created, updated, stats.articles + created);
+          if (reward) session.addMessage('system', reward);
+        }
 
         // Check milestones
-        const milestone = checkMilestones({ ...newStats, articles: newStats.articles + created });
+        const milestone = checkMilestones({ ...stats, articles: stats.articles + created });
         if (milestone) session.addMessage('system', milestone);
 
         setTempStatus(`+${sources.length} source${sources.length > 1 ? 's' : ''}`);

@@ -1,6 +1,6 @@
 {
   "name": "browzy",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "LLM-powered personal knowledge base engine",
   "type": "module",
   "main": "dist/index.js",
@@ -28,7 +28,6 @@
     "@anthropic-ai/sdk": "^0.39.0",
     "@types/react": "^19.2.14",
     "better-sqlite3": "^11.7.0",
-    "browzy": "^1.0.0",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
     "dotenv": "^17.4.0",

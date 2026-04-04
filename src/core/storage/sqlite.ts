@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'path';
 import type { SearchResult } from '../types.js';
+import { runMigrations } from './migrations.js';
 
 export class SQLiteStorage {
   private db: Database.Database;
@@ -9,10 +10,10 @@ export class SQLiteStorage {
     const dbPath = join(dataDir, '.browzy', 'browzy.db');
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
-    this.init();
+    this.init(dbPath);
   }
 
-  private init(): void {
+  private init(dbPath: string): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sources (
         id TEXT PRIMARY KEY,
@@ -34,15 +35,9 @@ export class SQLiteStorage {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
-
-      CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
-        slug,
-        title,
-        summary,
-        content,
-        tags
-      );
     `);
+
+    runMigrations(this.db, dbPath);
   }
 
   // ── Sources ──────────────────────────────────────────────────
@@ -114,7 +109,7 @@ export class SQLiteStorage {
     this.db.prepare('DELETE FROM articles_fts WHERE slug = ?').run(slug);
   }
 
-  search(query: string, limit = 10): SearchResult[] {
+  search(query: string, limit = 50): SearchResult[] {
     limit = Math.min(Math.max(limit, 1), 1000);
     // Sanitize query for FTS5: strip special chars, quote each term
     const sanitized = query
@@ -127,12 +122,14 @@ export class SQLiteStorage {
 
     if (!sanitized) return [];
 
+    // BM25 weights by column declaration order:
+    // slug=0 (UNINDEXED), title=10.0, summary=5.0, content=1.0, tags=8.0
     const rows = this.db.prepare(`
-      SELECT slug, title, snippet(articles_fts, 3, '<b>', '</b>', '...', 40) as snippet,
-             rank
+      SELECT slug, title, snippet(articles_fts, 3, '<mark>', '</mark>', '...', 32) as snippet,
+             bm25(articles_fts, 0, 10.0, 5.0, 1.0, 8.0) as rank
       FROM articles_fts
       WHERE articles_fts MATCH ?
-      ORDER BY rank
+      ORDER BY bm25(articles_fts, 0, 10.0, 5.0, 1.0, 8.0)
       LIMIT ?
     `).all(sanitized, limit) as Array<{ slug: string; title: string; snippet: string; rank: number }>;
 
@@ -140,7 +137,7 @@ export class SQLiteStorage {
       slug: row.slug,
       title: row.title,
       snippet: row.snippet,
-      score: -row.rank, // FTS5 rank is negative, lower is better
+      score: -row.rank, // BM25 returns negative values; more negative = better match
     }));
   }
 

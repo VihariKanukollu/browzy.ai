@@ -125,6 +125,46 @@ function safeImageExt(imgUrl: string): string {
   }
 }
 
+// ── Content Cleanup ─────────────────────────────────────────────
+
+const MAX_CONTENT_LENGTH = 100000; // 100K chars max for markdown content
+
+/**
+ * Strip non-article content from HTML before conversion.
+ * Removes navbars, footers, sidebars, cookie banners, ads, scripts.
+ * Keeps the main article/content area.
+ */
+function stripNonContent(html: string): string {
+  let cleaned = html;
+
+  // Remove script and style tags entirely
+  cleaned = cleaned.replace(/<script[\s\S]*?<\/script>/gi, '');
+  cleaned = cleaned.replace(/<style[\s\S]*?<\/style>/gi, '');
+  cleaned = cleaned.replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
+
+  // Remove common non-content elements by tag
+  const removeTags = ['nav', 'footer', 'aside', 'iframe', 'svg'];
+  for (const tag of removeTags) {
+    cleaned = cleaned.replace(new RegExp(`<${tag}[\\s\\S]*?<\\/${tag}>`, 'gi'), '');
+  }
+
+  // Remove elements by common non-content class/id patterns
+  const nonContentPatterns = [
+    /class="[^"]*(?:cookie|consent|banner|popup|modal|overlay|sidebar|navigation|menu|footer|header|social|share|comment|ad-|ads-|advert)[^"]*"/gi,
+    /id="[^"]*(?:cookie|consent|banner|popup|modal|overlay|sidebar|navigation|menu|footer|header|social|share|comment|ad-|ads-|advert)[^"]*"/gi,
+  ];
+
+  // Remove divs matching non-content patterns (simplified — won't catch nested, but strips most)
+  for (const pattern of nonContentPatterns) {
+    cleaned = cleaned.replace(pattern, 'class="browzy-stripped"');
+  }
+
+  // Remove HTML comments
+  cleaned = cleaned.replace(/<!--[\s\S]*?-->/g, '');
+
+  return cleaned;
+}
+
 // ── Main ─────────────────────────────────────────────────────────
 
 const turndown = new TurndownService({
@@ -144,29 +184,46 @@ export async function ingestWeb(
     throw new Error('Cannot fetch private or internal URLs');
   }
 
-  const response = await fetchFollowingSafeRedirects(url, { headers: HEADERS });
-  if (!response.ok) {
-    throw new Error(`Fetch failed: ${response.status} ${response.statusText}`);
+  // Check web cache first
+  const { webCache } = await import('../retrieval/webCache.js');
+  const cachedHtml = webCache.get(url);
+  let html: string;
+
+  if (cachedHtml) {
+    html = cachedHtml;
+  } else {
+    const response = await fetchFollowingSafeRedirects(url, { headers: HEADERS });
+    if (!response.ok) {
+      throw new Error(`Fetch failed: ${response.status} ${response.statusText}`);
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('text/') && !contentType.includes('html') && !contentType.includes('xml')) {
+      throw new Error(`Unexpected content type: ${contentType}. Expected HTML or text.`);
+    }
+
+    const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
+    if (contentLength > MAX_HTML_BYTES) {
+      throw new Error(`Page too large: ${(contentLength / 1024 / 1024).toFixed(1)}MB exceeds ${(MAX_HTML_BYTES / 1024 / 1024).toFixed(0)}MB limit`);
+    }
+
+    html = await response.text();
+    if (Buffer.byteLength(html) > MAX_HTML_BYTES) {
+      throw new Error('Page content exceeds size limit');
+    }
+
+    // Cache for 15 minutes
+    webCache.set(url, html);
   }
 
-  // Content-type guard
-  const contentType = response.headers.get('content-type') || '';
-  if (!contentType.includes('text/') && !contentType.includes('html') && !contentType.includes('xml')) {
-    throw new Error(`Unexpected content type: ${contentType}. Expected HTML or text.`);
-  }
+  // Strip non-content elements before conversion
+  const cleanedHtml = stripNonContent(html);
+  let markdown = sanitizeUnicode(turndown.turndown(cleanedHtml));
 
-  // Content-length guard (pre-read)
-  const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
-  if (contentLength > MAX_HTML_BYTES) {
-    throw new Error(`Page too large: ${(contentLength / 1024 / 1024).toFixed(1)}MB exceeds ${(MAX_HTML_BYTES / 1024 / 1024).toFixed(0)}MB limit`);
+  // Enforce content size limit
+  if (markdown.length > MAX_CONTENT_LENGTH) {
+    markdown = markdown.slice(0, MAX_CONTENT_LENGTH) + '\n\n[...content truncated at 100K characters]';
   }
-
-  const html = await response.text();
-  // Post-read size check (content-length can be missing or wrong)
-  if (Buffer.byteLength(html) > MAX_HTML_BYTES) {
-    throw new Error('Page content exceeds size limit');
-  }
-  const markdown = sanitizeUnicode(turndown.turndown(html));
 
   // Extract title
   const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
