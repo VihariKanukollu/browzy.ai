@@ -341,4 +341,7 @@ npm test         # Run tests
 
 ## License
 
-[MIT](LICENSE) - Vihari Kanukollu
+[MIT](LICENSE) - Vihari Kanukollu 
+
+## Attribution
+@karpathy - https://github.com/karpathy for the ideation on github.
